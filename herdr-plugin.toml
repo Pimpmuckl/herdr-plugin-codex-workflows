@@ -1,0 +1,19 @@
+id = "ogulcancelik.github-start"
+name = "GitHub Start"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Start a Herdr tab from a GitHub issue, PR, or discussion."
+platforms = ["linux", "macos", "windows"]
+
+[[actions]]
+id = "open"
+title = "Start from GitHub item"
+contexts = ["workspace", "tab", "pane"]
+command = ["node", "open.js"]
+
+[[panes]]
+id = "prompt"
+title = "GitHub Start"
+placement = "overlay"
+command = ["node", "prompt.js"]
+

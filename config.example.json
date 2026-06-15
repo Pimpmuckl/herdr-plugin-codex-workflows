@@ -1,0 +1,23 @@
+{
+  "defaultAgent": "codex",
+  "agents": {
+    "codex": {
+      "command": "codex",
+      "renameCommand": "/rename {sessionId}"
+    },
+    "claude": {
+      "command": "claude",
+      "renameCommand": "/rename {sessionId}"
+    }
+  },
+  "promptTemplate": "see {url}, lets discuss the problem,shape,kiss fix",
+  "tabLabelTemplate": "{sessionId} {repoName}",
+  "sessionIdTemplate": "gh-{kind}-{number}",
+  "unknownSessionId": "gh-item",
+  "timing": {
+    "afterAgentStartMs": 1500,
+    "afterRenameMs": 700,
+    "afterOverlayCloseFocusMs": 400
+  }
+}
+
