@@ -13,19 +13,24 @@ const configDir = process.env.HERDR_PLUGIN_CONFIG_DIR || pluginRoot;
 const stateDir = process.env.HERDR_PLUGIN_STATE_DIR || configDir;
 const context = readJson(process.env.HERDR_PLUGIN_CONTEXT_JSON) || {};
 
+const AGENT_DETECT_POLL_MS = 1000;
+const AGENT_COMMAND_START_TIMEOUT_MS = 2000;
+const AGENT_COMMAND_SETTLE_MS = 700;
+
 const defaultConfig = {
   defaultAgent: "codex",
   agents: {
     codex: { command: "codex", renameCommand: "/rename {sessionId}" },
     claude: { command: "claude", renameCommand: "/rename {sessionId}" },
+    pi: { command: "pi --name {sessionId}", renameCommand: "" },
   },
   promptTemplate: "see {url}, lets discuss the problem,shape,kiss fix",
   tabLabelTemplate: "{sessionId} {repoName}",
   sessionIdTemplate: "gh-{kind}-{number}",
   unknownSessionId: "gh-item",
   timing: {
-    afterAgentStartMs: 1500,
-    afterRenameMs: 700,
+    agentDetectTimeoutMs: 5000,
+    agentIdleTimeoutMs: 30000,
     afterOverlayCloseFocusMs: 400,
   },
 };
@@ -185,6 +190,18 @@ function renderTemplate(template, values) {
   });
 }
 
+function shellQuote(value) {
+  const text = String(value ?? "");
+  if (/^[A-Za-z0-9_./:=@%+-]*$/.test(text)) return text || "''";
+  return `'${text.replace(/'/g, `'"'"'`)}'`;
+}
+
+function renderShellTemplate(template, values) {
+  return String(template || "").replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => {
+    return shellQuote(values[key]);
+  });
+}
+
 function normalizeAgent(value, config) {
   const agent = value.trim().toLowerCase();
   if (!agent) return "";
@@ -209,20 +226,85 @@ function writeDefaultAgent(agent) {
   fs.writeFileSync(path.join(stateDir, "default-agent"), `${agent}\n`, "utf8");
 }
 
-function agentCommand(agent, config) {
+function agentCommand(agent, config, item) {
   const command = config.agents?.[agent]?.command;
-  if (Array.isArray(command)) return command.join(" ");
-  return String(command || agent);
+  if (Array.isArray(command)) {
+    return command.map((part) => renderShellTemplate(part, item)).join(" ");
+  }
+  return renderShellTemplate(String(command || agent), item);
 }
 
 function renameCommand(agent, config, item) {
-  const template = config.agents?.[agent]?.renameCommand || "/rename {sessionId}";
-  return renderTemplate(template, item);
+  const agentConfig = config.agents?.[agent] || {};
+  const template = Object.hasOwn(agentConfig, "renameCommand")
+    ? agentConfig.renameCommand
+    : "/rename {sessionId}";
+  return renderTemplate(template, item).trim();
 }
 
 function discussionPrompt(config, item) {
   const target = item.url || item.raw;
   return renderTemplate(config.promptTemplate, { ...item, url: target });
+}
+
+function timingValue(config, key, fallback) {
+  const value = Number(config.timing?.[key]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function agentStatus(paneId) {
+  try {
+    const response = runHerdrJson(["agent", "get", paneId]);
+    return response?.result?.agent?.agent_status || null;
+  } catch {
+    return null;
+  }
+}
+
+function waitForAgentDetected(paneId, config) {
+  const timeoutMs = timingValue(config, "agentDetectTimeoutMs", 5000);
+  const pollMs = AGENT_DETECT_POLL_MS;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    if (agentStatus(paneId)) return true;
+    sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
+  }
+  return false;
+}
+
+function waitForAgentIdle(paneId, config, action) {
+  const timeoutMs = timingValue(config, "agentIdleTimeoutMs", 30000);
+  try {
+    runHerdr(["agent", "wait", paneId, "--status", "idle", "--timeout", String(timeoutMs)]);
+  } catch (error) {
+    throw new Error(`${action} did not reach idle state within ${timeoutMs}ms: ${error.message}`);
+  }
+}
+
+function waitForAgentReady(paneId, config) {
+  if (!waitForAgentDetected(paneId, config)) {
+    const timeoutMs = timingValue(config, "agentDetectTimeoutMs", 5000);
+    throw new Error(
+      `Herdr did not detect an agent in pane ${paneId} within ${timeoutMs}ms; configured commands must start a Herdr-detectable agent`,
+    );
+  }
+  waitForAgentIdle(paneId, config, "agent startup");
+}
+
+function waitForAgentTurnAfterSubmit(paneId, config, action) {
+  const timeoutMs = AGENT_COMMAND_START_TIMEOUT_MS;
+  const pollMs = Math.min(100, AGENT_DETECT_POLL_MS);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    const status = agentStatus(paneId);
+    if (status && status !== "idle") {
+      waitForAgentIdle(paneId, config, action);
+      return;
+    }
+    sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
+  }
+  sleep(AGENT_COMMAND_SETTLE_MS);
+  waitForAgentIdle(paneId, config, action);
 }
 
 async function main() {
@@ -262,10 +344,14 @@ async function main() {
 
   output.write(`Starting ${agent} as ${item.sessionId}...\n`);
   runHerdr(["pane", "rename", paneId, item.sessionId]);
-  runHerdr(["pane", "run", paneId, agentCommand(agent, config)]);
-  sleep(config.timing.afterAgentStartMs);
-  runHerdr(["pane", "run", paneId, renameCommand(agent, config, item)]);
-  sleep(config.timing.afterRenameMs);
+  runHerdr(["pane", "run", paneId, agentCommand(agent, config, item)]);
+  output.write("Waiting for Herdr to detect the agent and for it to become idle...\n");
+  waitForAgentReady(paneId, config);
+  const rename = renameCommand(agent, config, item);
+  if (rename) {
+    runHerdr(["pane", "run", paneId, rename]);
+    waitForAgentTurnAfterSubmit(paneId, config, "rename command");
+  }
   runHerdr(["pane", "run", paneId, discussionPrompt(config, item)]);
   focusTabAfterOverlayCloses(tabId, config.timing.afterOverlayCloseFocusMs);
   output.write(`Done. ${agent} is running in ${tabId} as ${item.sessionId}.\n`);

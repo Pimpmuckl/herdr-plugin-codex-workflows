@@ -2,9 +2,9 @@
 
 Herdr plugin that starts a new tab from a GitHub issue, PR, or discussion.
 
-Press a keybind, paste a GitHub URL, choose `codex` or `claude`, and the plugin
+Press a keybind, paste a GitHub URL, choose any configured agent, and the plugin
 creates a named tab, starts the agent in the tab's root pane, renames the agent
-session, and sends a short discussion prompt.
+session when supported, and sends a short discussion prompt.
 
 ## Install
 
@@ -65,8 +65,8 @@ Find it with:
 herdr plugin config-dir ogulcancelik.github-start
 ```
 
-Edit `config.json` to change the default agent, commands, prompt, tab label,
-session id shape, or timing:
+Edit `config.json` to change the configured agents, default agent, commands,
+prompt, tab label, session id shape, or timing:
 
 ```json
 {
@@ -79,16 +79,49 @@ session id shape, or timing:
     "claude": {
       "command": "claude",
       "renameCommand": "/rename {sessionId}"
+    },
+    "pi": {
+      "command": "pi --name {sessionId}",
+      "renameCommand": ""
     }
   },
   "promptTemplate": "see {url}, lets discuss the problem,shape,kiss fix",
   "tabLabelTemplate": "{sessionId} {repoName}",
-  "sessionIdTemplate": "gh-{kind}-{number}"
+  "sessionIdTemplate": "gh-{kind}-{number}",
+  "timing": {
+    "agentDetectTimeoutMs": 5000,
+    "agentIdleTimeoutMs": 30000,
+    "afterOverlayCloseFocusMs": 400
+  }
 }
 ```
 
-Available template values include `{url}`, `{raw}`, `{repo}`, `{repoName}`,
-`{kind}`, `{number}`, and `{sessionId}`.
+The `agents` object is open-ended. Add any Herdr-detectable agent by giving it a
+lowercase key and a command. Set `renameCommand` to the slash command the agent
+uses for session renaming, or to an empty string when the command already names
+the session or the agent does not support renaming.
+
+For example:
+
+```json
+{
+  "defaultAgent": "opencode",
+  "agents": {
+    "opencode": {
+      "command": "opencode",
+      "renameCommand": ""
+    },
+    "gemini": {
+      "command": "gemini",
+      "renameCommand": ""
+    }
+  }
+}
+```
+
+Agent `command`, `renameCommand`, and the prompt, tab label, and session id
+templates can use `{url}`, `{raw}`, `{repo}`, `{repoName}`, `{kind}`, `{number}`,
+and `{sessionId}`. Values rendered into agent `command` are shell-quoted.
 
 ## Notes
 
@@ -96,7 +129,9 @@ Available template values include `{url}`, `{raw}`, `{repo}`, `{repoName}`,
 - Requires Node.js 18 or newer.
 - Uses no npm packages.
 - The agent pane starts through `herdr pane run`, not `herdr agent start`, so
-  exiting Codex or Claude returns to the shell instead of closing the pane.
-- The plugin sends slash commands after a short delay. If your terminal or agent
-  starts slowly, increase values under `timing` in `config.json`.
+  exiting the configured agent returns to the shell instead of closing the pane.
+- The plugin waits for Herdr to detect the new agent pane, then waits for the
+  agent to report `idle` before sending the prompt or configured rename command.
+  Configured agent commands must start a Herdr-detectable agent. If your terminal
+  or agent starts slowly, increase values under `timing` in `config.json`.
 

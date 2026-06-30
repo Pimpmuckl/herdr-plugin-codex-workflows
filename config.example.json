@@ -8,6 +8,10 @@
     "claude": {
       "command": "claude",
       "renameCommand": "/rename {sessionId}"
+    },
+    "pi": {
+      "command": "pi --name {sessionId}",
+      "renameCommand": ""
     }
   },
   "promptTemplate": "see {url}, lets discuss the problem,shape,kiss fix",
@@ -15,8 +19,8 @@
   "sessionIdTemplate": "gh-{kind}-{number}",
   "unknownSessionId": "gh-item",
   "timing": {
-    "afterAgentStartMs": 1500,
-    "afterRenameMs": 700,
+    "agentDetectTimeoutMs": 5000,
+    "agentIdleTimeoutMs": 30000,
     "afterOverlayCloseFocusMs": 400
   }
 }
