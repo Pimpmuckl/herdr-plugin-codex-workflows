@@ -14,8 +14,6 @@ const result = spawnSync(
     "ogulcancelik.github-start",
     "--entrypoint",
     "prompt",
-    "--placement",
-    "overlay",
     "--focus",
   ],
   { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
@@ -24,4 +22,3 @@ const result = spawnSync(
 if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);
 process.exit(result.status ?? (result.error ? 1 : 0));
-

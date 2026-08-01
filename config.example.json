@@ -1,27 +1,17 @@
 {
-  "defaultAgent": "codex",
+  "defaultAgent": "pi",
+  "projectRepoName": "herdr",
   "agents": {
     "codex": {
-      "command": "codex",
-      "renameCommand": "/rename {sessionId}"
-    },
-    "claude": {
-      "command": "claude",
-      "renameCommand": "/rename {sessionId}"
-    },
-    "pi": {
-      "command": "pi --name {sessionId}",
-      "renameCommand": ""
+      "renameCommand": "/rename {sessionName}"
     }
   },
+  "githubSessionNameTemplate": "{nameKind}-{number}",
   "promptTemplate": "see {url}, lets discuss the problem,shape,kiss fix",
-  "tabLabelTemplate": "{sessionId} {repoName}",
-  "sessionIdTemplate": "gh-{kind}-{number}",
-  "unknownSessionId": "gh-item",
+  "tabLabelTemplate": "{sessionName}",
   "timing": {
-    "agentDetectTimeoutMs": 5000,
-    "agentIdleTimeoutMs": 30000,
-    "afterOverlayCloseFocusMs": 400
+    "agentStartTimeoutMs": 30000,
+    "sessionNameTimeoutMs": 5000,
+    "shellReadyTimeoutMs": 5000
   }
 }
-

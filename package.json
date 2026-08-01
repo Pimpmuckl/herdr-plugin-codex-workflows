@@ -1,9 +1,8 @@
 {
   "name": "herdr-plugin-github-start",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
-    "check": "node --check open.js && node --check prompt.js"
+    "check": "node --check open.js && node --check prompt.js && node --check launcher.js && node --check session-discovery.js && node --check checkout-routing.js && node --test"
   }
 }
-

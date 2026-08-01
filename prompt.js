@@ -5,33 +5,44 @@ const fs = require("node:fs");
 const path = require("node:path");
 const readline = require("node:readline/promises");
 const { stdin: input, stdout: output } = require("node:process");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawnSync } = require("node:child_process");
+const {
+  agentNameForSession,
+  buildNewArguments,
+  buildResumeArguments,
+  buildShellCommand,
+  discussionPrompt,
+  formatAge,
+  parseTarget,
+  renderTemplate,
+} = require("./launcher.js");
+const {
+  attachLiveAgents,
+  codexSessionIdsWithName,
+  discoverNamedSessions,
+  orderSessionsForCwd,
+} = require("./session-discovery.js");
 
 const herdr = process.env.HERDR_BIN_PATH || "herdr";
 const pluginRoot = process.env.HERDR_PLUGIN_ROOT || __dirname;
 const configDir = process.env.HERDR_PLUGIN_CONFIG_DIR || pluginRoot;
 const stateDir = process.env.HERDR_PLUGIN_STATE_DIR || configDir;
 const context = readJson(process.env.HERDR_PLUGIN_CONTEXT_JSON) || {};
-
-const AGENT_DETECT_POLL_MS = 1000;
-const AGENT_COMMAND_START_TIMEOUT_MS = 2000;
-const AGENT_COMMAND_SETTLE_MS = 700;
+const supportedHarnesses = ["pi", "codex", "claude"];
 
 const defaultConfig = {
-  defaultAgent: "codex",
+  defaultAgent: "pi",
+  projectRepoName: "herdr",
   agents: {
-    codex: { command: "codex", renameCommand: "/rename {sessionId}" },
-    claude: { command: "claude", renameCommand: "/rename {sessionId}" },
-    pi: { command: "pi --name {sessionId}", renameCommand: "" },
+    codex: { renameCommand: "/rename {sessionName}" },
   },
+  githubSessionNameTemplate: "{nameKind}-{number}",
   promptTemplate: "see {url}, lets discuss the problem,shape,kiss fix",
-  tabLabelTemplate: "{sessionId} {repoName}",
-  sessionIdTemplate: "gh-{kind}-{number}",
-  unknownSessionId: "gh-item",
+  tabLabelTemplate: "{sessionName}",
   timing: {
-    agentDetectTimeoutMs: 5000,
-    agentIdleTimeoutMs: 30000,
-    afterOverlayCloseFocusMs: 400,
+    agentStartTimeoutMs: 30000,
+    sessionNameTimeoutMs: 5000,
+    shellReadyTimeoutMs: 5000,
   },
 };
 
@@ -67,21 +78,26 @@ function seedConfigFile() {
 
 function mergeConfig(base, override) {
   if (!override || typeof override !== "object") return base;
-  const merged = { ...base, ...override };
-  merged.agents = { ...base.agents, ...(override.agents || {}) };
-  merged.timing = { ...base.timing, ...(override.timing || {}) };
-  return merged;
+  return {
+    ...base,
+    ...override,
+    githubSessionNameTemplate: override.githubSessionNameTemplate || base.githubSessionNameTemplate,
+    projectRepoName: override.projectRepoName || base.projectRepoName,
+    agents: {
+      codex: { ...base.agents.codex, ...(override.agents?.codex || {}) },
+    },
+    timing: { ...base.timing, ...(override.timing || {}) },
+  };
 }
 
 function loadConfig() {
   return mergeConfig(defaultConfig, readJsonFile(seedConfigFile()));
 }
 
-function runHerdr(args, options = {}) {
+function runHerdr(args) {
   const result = spawnSync(herdr, args, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
-    ...options,
   });
   if (result.error) {
     throw new Error(`${herdr} ${args.join(" ")} failed to start: ${result.error.message}`);
@@ -89,7 +105,14 @@ function runHerdr(args, options = {}) {
   if (result.status !== 0) {
     const stderr = result.stderr.trim();
     const stdout = result.stdout.trim();
-    throw new Error(`${herdr} ${args.join(" ")} failed: ${stderr || stdout || `exit ${result.status}`}`);
+    const detail = stderr || stdout || `exit ${result.status}`;
+    const error = new Error(`${herdr} ${args.join(" ")} failed: ${detail}`);
+    try {
+      error.herdrCode = JSON.parse(detail)?.error?.code;
+    } catch {
+      // Preserve non-JSON command failures as ordinary errors.
+    }
+    throw error;
   }
   return result.stdout;
 }
@@ -103,262 +126,271 @@ function runHerdrJson(args) {
   }
 }
 
-function sleep(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
+function normalizeHarness(value) {
+  const harness = value.trim().toLowerCase();
+  if (!harness) return "";
+  const aliases = { p: "pi", c: "codex", cx: "codex", cl: "claude" };
+  const normalized = aliases[harness] || harness;
+  return supportedHarnesses.includes(normalized) ? normalized : "";
 }
 
-function focusTabAfterOverlayCloses(tabId, delayMs) {
-  const code = `
-    const { spawnSync } = require("node:child_process");
-    const delay = Number(process.argv[3] || "400");
-    setTimeout(() => {
-      spawnSync(process.argv[1], ["tab", "focus", process.argv[2]], { stdio: "ignore" });
-    }, delay);
-  `;
-  const child = spawn(process.execPath, ["-e", code, herdr, tabId, String(delayMs)], {
-    detached: true,
-    env: process.env,
-    stdio: "ignore",
+function readDefaultHarness(config) {
+  const file = path.join(stateDir, "default-agent");
+  try {
+    const saved = normalizeHarness(fs.readFileSync(file, "utf8"));
+    if (saved) return saved;
+  } catch {
+    // Use configured fallback.
+  }
+  return normalizeHarness(config.defaultAgent) || "pi";
+}
+
+function writeDefaultHarness(harness) {
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, "default-agent"), `${harness}\n`, "utf8");
+}
+
+function listLiveAgents() {
+  try {
+    const response = runHerdrJson(["agent", "list"]);
+    return response?.result?.agents || [];
+  } catch {
+    return [];
+  }
+}
+
+async function waitForCodexName(sessionName, previousIds, timeoutMs) {
+  const baseline = new Set(previousIds);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const namedIds = await codexSessionIdsWithName(sessionName);
+    if (namedIds.some((id) => !baseline.has(id))) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Codex did not save session name ${sessionName} within ${timeoutMs}ms`);
+}
+
+function describeSession(session, currentCwd) {
+  const state = session.liveAgent ? "RUNNING" : "saved  ";
+  const cwd = session.cwd || "unknown cwd";
+  const local = session.cwd && path.resolve(session.cwd) === path.resolve(currentCwd) ? " | current cwd" : "";
+  const id = session.id ? session.id.slice(0, 8) : "unknown";
+  return `${state} | ${session.harness.padEnd(6)} | ${formatAge(session.modifiedMs).padStart(4)} | ${id} | ${cwd}${local}`;
+}
+
+async function chooseSavedSession(rl, sessions, currentCwd) {
+  output.write(`\nFound ${sessions.length} named session match${sessions.length === 1 ? "" : "es"}:\n`);
+  sessions.forEach((session, index) => {
+    output.write(`  ${index + 1}) ${describeSession(session, currentCwd)}\n`);
+    output.write(`     session name: ${session.name}\n`);
   });
-  child.unref();
+  output.write("  n) start a new session\n");
+  output.write("  q) cancel\n");
+
+  while (true) {
+    const answer = (await rl.question("Choose [1]: ")).trim().toLowerCase();
+    if (answer === "n" || answer === "new") return { action: "new" };
+    if (answer === "q" || answer === "quit" || answer === "cancel") return { action: "cancel" };
+    const index = answer ? Number(answer) - 1 : 0;
+    if (Number.isInteger(index) && sessions[index]) {
+      return sessions[index].liveAgent
+        ? { action: "focus", session: sessions[index] }
+        : { action: "resume", session: sessions[index] };
+    }
+    output.write(`Choose 1-${sessions.length}, n, or q.\n`);
+  }
 }
 
-function parseItem(raw, config) {
-  const item = raw.trim();
-  if (!item) return null;
-
-  const url = item.match(/github\.com\/([^/\s]+\/[^/\s]+)\/(issues|discussions|pull)\/([0-9]+)/i);
-  if (url) {
-    return normalizeItem({
-      raw: item,
-      repo: url[1],
-      kind: url[2].toLowerCase(),
-      number: url[3],
-      url: item.startsWith("http") ? item : `https://${item}`,
-    }, config);
+async function chooseHarness(rl, config) {
+  const fallback = readDefaultHarness(config);
+  while (true) {
+    const answer = await rl.question(`Start with [pi/codex/claude] (${fallback}): `);
+    const harness = normalizeHarness(answer) || (!answer.trim() ? fallback : "");
+    if (harness) {
+      writeDefaultHarness(harness);
+      return harness;
+    }
+    output.write("Type pi, codex, or claude.\n");
   }
-
-  const number = item.match(/^#?([0-9]+)$/);
-  if (number) {
-    return normalizeItem({ raw: item, kind: "issue", number: number[1] }, config);
-  }
-
-  const words = item.match(/^(issue|issues|discussion|discussions|pull|pr)[\s#-]*([0-9]+)$/i);
-  if (words) {
-    return normalizeItem({ raw: item, kind: words[1].toLowerCase(), number: words[2] }, config);
-  }
-
-  return normalizeItem({ raw: item, kind: "item", number: "" }, config);
 }
 
-function normalizeItem(item, config) {
-  let kind = item.kind;
-  if (kind === "issues") kind = "issue";
-  if (kind === "discussions") kind = "discussion";
-  if (kind === "pull" || kind === "pr") kind = "pr";
-  const repoName = item.repo ? item.repo.split("/").pop() : "";
-  const values = { ...item, kind, repoName };
-  const sessionId = item.number
-    ? renderTemplate(config.sessionIdTemplate, values)
-    : config.unknownSessionId;
+function createTab(label, cwd, workspaceId) {
+  const command = ["tab", "create"];
+  if (workspaceId) command.push("--workspace", workspaceId);
+  command.push("--label", label, "--cwd", cwd, "--focus");
+  const response = runHerdrJson(command);
+  const tabId = response?.result?.tab?.tab_id;
+  const paneId = response?.result?.root_pane?.pane_id;
+  if (!tabId || !paneId) throw new Error("tab.create response did not include tab_id and root_pane.pane_id");
+  return { tabId, paneId };
+}
+
+function findMainProjectWorkspace(config) {
+  const response = runHerdrJson(["workspace", "list"]);
+  const workspaces = response?.result?.workspaces || [];
+  const workspace = workspaces.find((candidate) => {
+    const worktree = candidate.worktree;
+    return worktree
+      && worktree.repo_name === config.projectRepoName
+      && worktree.is_linked_worktree === false;
+  });
+  if (!workspace?.workspace_id || !workspace.worktree?.repo_root) {
+    throw new Error(`main ${config.projectRepoName} workspace is not open`);
+  }
   return {
-    ...item,
-    kind,
-    repoName,
-    sessionId: sanitizeSessionId(sessionId),
-    label: compact(renderTemplate(config.tabLabelTemplate, { ...values, sessionId })),
+    workspaceId: workspace.workspace_id,
+    cwd: workspace.worktree.repo_root,
   };
 }
 
-function sanitizeSessionId(value) {
-  const slug = String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._:-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^[-.]+|[-.]+$/g, "");
-  return slug || "gh-item";
+function createLaunchLocation(config, label) {
+  const project = findMainProjectWorkspace(config);
+  output.write(`\nCreating tab "${label}" in the main ${config.projectRepoName} workspace...\n`);
+  return { ...createTab(label, project.cwd, project.workspaceId), cwd: project.cwd };
 }
 
-function compact(value) {
-  return String(value || "").replace(/\s+/g, " ").trim();
-}
-
-function renderTemplate(template, values) {
-  return String(template || "").replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => {
-    return values[key] === undefined || values[key] === null ? "" : String(values[key]);
-  });
-}
-
-function shellQuote(value) {
-  const text = String(value ?? "");
-  if (/^[A-Za-z0-9_./:=@%+-]*$/.test(text)) return text || "''";
-  return `'${text.replace(/'/g, `'"'"'`)}'`;
-}
-
-function renderShellTemplate(template, values) {
-  return String(template || "").replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => {
-    return shellQuote(values[key]);
-  });
-}
-
-function normalizeAgent(value, config) {
-  const agent = value.trim().toLowerCase();
-  if (!agent) return "";
-  if (agent === "c" && config.agents.codex) return "codex";
-  if ((agent === "cl" || agent === "claude") && config.agents.claude) return "claude";
-  if (config.agents[agent]) return agent;
-  return "";
-}
-
-function readDefaultAgent(config) {
-  const file = path.join(stateDir, "default-agent");
-  try {
-    const value = normalizeAgent(fs.readFileSync(file, "utf8"), config);
-    return value || normalizeAgent(config.defaultAgent, config) || Object.keys(config.agents)[0] || "codex";
-  } catch {
-    return normalizeAgent(config.defaultAgent, config) || Object.keys(config.agents)[0] || "codex";
-  }
-}
-
-function writeDefaultAgent(agent) {
-  fs.mkdirSync(stateDir, { recursive: true });
-  fs.writeFileSync(path.join(stateDir, "default-agent"), `${agent}\n`, "utf8");
-}
-
-function agentCommand(agent, config, item) {
-  const command = config.agents?.[agent]?.command;
-  if (Array.isArray(command)) {
-    return command.map((part) => renderShellTemplate(part, item)).join(" ");
-  }
-  return renderShellTemplate(String(command || agent), item);
-}
-
-function renameCommand(agent, config, item) {
-  const agentConfig = config.agents?.[agent] || {};
-  const template = Object.hasOwn(agentConfig, "renameCommand")
-    ? agentConfig.renameCommand
-    : "/rename {sessionId}";
-  return renderTemplate(template, item).trim();
-}
-
-function discussionPrompt(config, item) {
-  const target = item.url || item.raw;
-  return renderTemplate(config.promptTemplate, { ...item, url: target });
-}
-
-function timingValue(config, key, fallback) {
-  const value = Number(config.timing?.[key]);
-  return Number.isFinite(value) && value >= 0 ? value : fallback;
-}
-
-function agentStatus(paneId) {
-  try {
-    const response = runHerdrJson(["agent", "get", paneId]);
-    return response?.result?.agent?.agent_status || null;
-  } catch {
-    return null;
-  }
-}
-
-function waitForAgentDetected(paneId, config) {
-  const timeoutMs = timingValue(config, "agentDetectTimeoutMs", 5000);
-  const pollMs = AGENT_DETECT_POLL_MS;
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() <= deadline) {
-    if (agentStatus(paneId)) return true;
-    sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
-  }
-  return false;
-}
-
-function waitForAgentIdle(paneId, config, action) {
-  const timeoutMs = timingValue(config, "agentIdleTimeoutMs", 30000);
-  try {
-    runHerdr(["agent", "wait", paneId, "--status", "idle", "--timeout", String(timeoutMs)]);
-  } catch (error) {
-    throw new Error(`${action} did not reach idle state within ${timeoutMs}ms: ${error.message}`);
-  }
-}
-
-function waitForAgentReady(paneId, config) {
-  if (!waitForAgentDetected(paneId, config)) {
-    const timeoutMs = timingValue(config, "agentDetectTimeoutMs", 5000);
-    throw new Error(
-      `Herdr did not detect an agent in pane ${paneId} within ${timeoutMs}ms; configured commands must start a Herdr-detectable agent`,
-    );
-  }
-  waitForAgentIdle(paneId, config, "agent startup");
-}
-
-function waitForAgentTurnAfterSubmit(paneId, config, action) {
-  const timeoutMs = AGENT_COMMAND_START_TIMEOUT_MS;
-  const pollMs = Math.min(100, AGENT_DETECT_POLL_MS);
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() <= deadline) {
-    const status = agentStatus(paneId);
-    if (status && status !== "idle") {
-      waitForAgentIdle(paneId, config, action);
-      return;
+async function waitForAvailableShell(paneId, deadline) {
+  while (Date.now() < deadline) {
+    try {
+      const response = runHerdrJson(["pane", "process-info", "--pane", paneId]);
+      const info = response?.result?.process_info;
+      if (
+        info?.shell_pid
+        && info.foreground_process_group_id === info.shell_pid
+        && info.foreground_processes?.length === 1
+        && info.foreground_processes[0].pid === info.shell_pid
+      ) {
+        return;
+      }
+    } catch {
+      // A newly created pane may not have a live terminal yet.
     }
-    sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  sleep(AGENT_COMMAND_SETTLE_MS);
-  waitForAgentIdle(paneId, config, action);
+  throw new Error(`pane ${paneId} did not reach an available shell before startup timed out`);
+}
+
+async function startAgent(agentName, harness, paneId, args, config) {
+  const command = harness === "pi"
+    ? ["pane", "run", paneId, buildShellCommand("pi", args)]
+    : [
+        "agent",
+        "start",
+        agentName,
+        "--kind",
+        harness,
+        "--pane",
+        paneId,
+        "--timeout",
+        String(config.timing.agentStartTimeoutMs),
+        ...(args.length > 0 ? ["--", ...args] : []),
+      ];
+
+  const deadline = Date.now() + config.timing.shellReadyTimeoutMs;
+  while (Date.now() < deadline) {
+    await waitForAvailableShell(paneId, deadline);
+    try {
+      runHerdr(command);
+      return harness === "pi" ? paneId : agentName;
+    } catch (error) {
+      if (error.herdrCode !== "agent_pane_busy") throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`pane ${paneId} remained busy until agent startup timed out`);
+}
+
+function promptAgent(agentName, text) {
+  if (!text) return;
+  runHerdr(["agent", "prompt", agentName, text]);
 }
 
 async function main() {
   const config = loadConfig();
+  const currentCwd = context.workspace_cwd || context.focused_pane_cwd || process.env.PWD || process.cwd();
   output.write("\x1b[2J\x1b[H");
-  output.write("GitHub Start\n\n");
+  output.write("Find named agent session\n\n");
 
   const rl = readline.createInterface({ input, output });
-  const defaultAgent = readDefaultAgent(config);
-  const agents = Object.keys(config.agents);
-
-  const rawItem = await rl.question("GitHub issue/discussion URL or number: ");
-  const item = parseItem(rawItem, config);
-  if (!item) {
-    output.write("\nCancelled.\n");
+  const rawTarget = await rl.question("Exact session name or GitHub target: ");
+  const target = parseTarget(rawTarget, config);
+  if (!target) {
     rl.close();
     return;
   }
 
-  let agent = "";
-  while (!agent) {
-    const answer = await rl.question(`Agent [${agents.join("/")}] (${defaultAgent}): `);
-    agent = normalizeAgent(answer, config) || (!answer.trim() ? defaultAgent : "");
-    if (!agent) output.write(`Type one of: ${agents.join(", ")}.\n`);
+  output.write("\nSearching session names in Pi, Codex, and Claude...\n");
+  const liveAgents = listLiveAgents();
+  const discovered = await discoverNamedSessions(target.searchNames, process.env, {
+    numericToken: target.numericNameToken,
+  });
+  const sessions = orderSessionsForCwd(attachLiveAgents(discovered, liveAgents), currentCwd);
+
+  let selected;
+  if (sessions.length > 0) {
+    selected = await chooseSavedSession(rl, sessions, currentCwd);
+  } else {
+    output.write(`\nNo named session found for "${target.raw}" in Pi, Codex, or Claude.\n`);
+    selected = { action: "new" };
   }
+
+  if (selected.action === "cancel") {
+    rl.close();
+    return;
+  }
+
+  if (selected.action === "focus") {
+    const paneId = selected.session.liveAgent?.pane_id;
+    rl.close();
+    if (!paneId) throw new Error("running session did not include a pane id");
+    output.write(`\nFocusing running ${selected.session.harness} session "${selected.session.name}".\n`);
+    runHerdr(["agent", "focus", paneId]);
+    return;
+  }
+
+  const harness = selected.action === "resume" ? selected.session.harness : await chooseHarness(rl, config);
+  const nativeArgs = selected.action === "resume"
+    ? buildResumeArguments(selected.session, target.url)
+    : buildNewArguments(harness, target.sessionName, target.url);
+  const previousCodexIds = selected.action === "new" && harness === "codex"
+    ? await codexSessionIdsWithName(target.sessionName)
+    : [];
+  const launchAgentName = harness === "pi"
+    ? ""
+    : selected.action === "resume"
+      ? agentNameForSession(`${harness}:${selected.session.id}`)
+      : target.agentName;
+  const tabLabel = selected.action === "resume" ? selected.session.name : target.label;
+  const location = createLaunchLocation(config, tabLabel);
   rl.close();
-  writeDefaultAgent(agent);
 
-  const cwd = context.workspace_cwd || context.focused_pane_cwd || process.env.PWD || process.cwd();
-  output.write(`\nCreating tab ${item.label}...\n`);
-  const tabResponse = runHerdrJson(["tab", "create", "--label", item.label, "--cwd", cwd, "--focus"]);
-  const tabId = tabResponse?.result?.tab?.tab_id;
-  const paneId = tabResponse?.result?.root_pane?.pane_id;
-  if (!tabId || !paneId) {
-    throw new Error("tab.create response did not include tab_id and root_pane.pane_id");
+  const { tabId, paneId } = location;
+  const verb = selected.action === "resume" ? "Resuming" : "Starting";
+  const nativeName = selected.action === "resume" ? selected.session.name : target.sessionName;
+  output.write(`Waiting for the new pane shell...\n`);
+  output.write(`${verb} ${harness} session "${nativeName}"...\n`);
+  const agentTarget = await startAgent(launchAgentName, harness, paneId, nativeArgs, config);
+
+  if (selected.action === "new") {
+    const rename = harness === "codex" ? renderTemplate(config.agents.codex.renameCommand, {
+      ...target,
+      sessionName: target.sessionName,
+      sessionId: target.sessionName,
+    }).trim() : "";
+    if (rename) {
+      promptAgent(agentTarget, rename);
+      await waitForCodexName(target.sessionName, previousCodexIds, config.timing.sessionNameTimeoutMs);
+    }
+    if (harness !== "pi") promptAgent(agentTarget, discussionPrompt(config, target));
   }
 
-  output.write(`Starting ${agent} as ${item.sessionId}...\n`);
-  runHerdr(["pane", "rename", paneId, item.sessionId]);
-  runHerdr(["pane", "run", paneId, agentCommand(agent, config, item)]);
-  output.write("Waiting for Herdr to detect the agent and for it to become idle...\n");
-  waitForAgentReady(paneId, config);
-  const rename = renameCommand(agent, config, item);
-  if (rename) {
-    runHerdr(["pane", "run", paneId, rename]);
-    waitForAgentTurnAfterSubmit(paneId, config, "rename command");
-  }
-  runHerdr(["pane", "run", paneId, discussionPrompt(config, item)]);
-  focusTabAfterOverlayCloses(tabId, config.timing.afterOverlayCloseFocusMs);
-  output.write(`Done. ${agent} is running in ${tabId} as ${item.sessionId}.\n`);
+  output.write(`Done. ${harness} is running in ${tabId} as "${nativeName}".\n`);
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   output.write(`\nError: ${error.message}\n`);
+  const rl = readline.createInterface({ input, output });
+  await rl.question("Press Enter to close.");
+  rl.close();
   process.exitCode = 1;
 });
-

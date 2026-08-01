@@ -1,10 +1,11 @@
 # Herdr GitHub Start
 
-Herdr plugin that starts a new tab from a GitHub issue, PR, or discussion.
+Named-session finder and launcher for Pi, Codex, and Claude Code.
 
-Press a keybind, paste a GitHub URL, choose any configured agent, and the plugin
-creates a named tab, starts the agent in the tab's root pane, renames the agent
-session when supported, and sends a short discussion prompt.
+Press a keybind and enter a native session name or GitHub target. The popup
+searches user-assigned names in all three harnesses, shows what it found, focuses
+a matching live Herdr agent, resumes a selected saved session, or offers to start
+a new named session.
 
 ## Install
 
@@ -22,14 +23,12 @@ herdr plugin link .
 
 ## Keybind
 
-Add a Herdr keybind:
-
 ```toml
 [[keys.command]]
 key = "alt+g"
 type = "plugin_action"
 command = "ogulcancelik.github-start.open"
-description = "start from github"
+description = "find named agent session"
 ```
 
 Then reload Herdr config:
@@ -38,100 +37,78 @@ Then reload Herdr config:
 herdr server reload-config
 ```
 
-## Usage
+## Search behavior
 
-Invoke the action and paste any of these:
+The search reads only the explicit naming records used by each harness:
 
-```text
-https://github.com/ogulcancelik/herdr/issues/614
-https://github.com/ogulcancelik/herdr/discussions/12
-https://github.com/ogulcancelik/herdr/pull/99
-issue 614
-discussion 12
-#614
-```
+- Pi: the latest `session_info.name` in each session JSONL
+- Codex: the latest `thread_name` per id in `session_index.jsonl`
+- Claude Code: the latest `custom-title.customTitle` in each session JSONL
 
-The plugin creates names like `gh-issue-614`, `gh-discussion-12`, or
-`gh-pr-99`.
+Ordinary text is matched exactly. A bare number such as `1158` also matches that
+number as a standalone token inside a session name, including `pr-1158`,
+`herdr#pr-1158`, and `Fix #1158 safely`, but not `pr-11158`. Exact matches appear
+first. GitHub targets also search exact compatible names so existing sessions
+remain findable. For example, a Herdr issue URL searches repository-qualified,
+numeric, and legacy `gh-issue-1158` names. Transcript contents are never treated
+as session names.
+
+A result shows whether it is already running, its harness, cwd, activity age,
+and native id. One or many results use the same explicit picker. A running
+result focuses its existing Herdr pane. A saved result resumes its native path
+or UUID. No result is reported explicitly before the harness picker opens.
+
+The popup works from any focused workspace, but every new or resumed session is
+launched in the open main `herdr` workspace with its cwd set to that workspace's
+repository root. Linked-worktree workspaces are never selected as the launch
+destination. Running sessions are focused wherever they already live. The
+launcher waits for every new root pane's shell before starting the agent.
+
+New sessions created from full GitHub URLs use compact names such as
+`issue-1158`, `pull-99`, and `discussion-12`. Bare numbers use the number itself.
+Ordinary text is preserved exactly as the native session name. Pi receives the
+GitHub URL through `pi-gh-context` without submitting a model prompt; the URL is
+persisted, left in the editor, and shown as a clickable widget above it. Other harnesses
+continue to receive the configured discussion prompt.
 
 ## Configuration
 
-On first run, the plugin copies `config.example.json` into Herdr's plugin config
-directory as `config.json`.
-
-Find it with:
+On first run, the plugin copies `config.example.json` into its Herdr plugin
+config directory as `config.json`:
 
 ```sh
 herdr plugin config-dir ogulcancelik.github-start
 ```
 
-Edit `config.json` to change the configured agents, default agent, commands,
-prompt, tab label, session id shape, or timing:
-
 ```json
 {
-  "defaultAgent": "codex",
+  "defaultAgent": "pi",
+  "projectRepoName": "herdr",
   "agents": {
-    "codex": {
-      "command": "codex",
-      "renameCommand": "/rename {sessionId}"
-    },
-    "claude": {
-      "command": "claude",
-      "renameCommand": "/rename {sessionId}"
-    },
-    "pi": {
-      "command": "pi --name {sessionId}",
-      "renameCommand": ""
-    }
+    "codex": { "renameCommand": "/rename {sessionName}" }
   },
+  "githubSessionNameTemplate": "{nameKind}-{number}",
   "promptTemplate": "see {url}, lets discuss the problem,shape,kiss fix",
-  "tabLabelTemplate": "{sessionId} {repoName}",
-  "sessionIdTemplate": "gh-{kind}-{number}",
+  "tabLabelTemplate": "{sessionName}",
   "timing": {
-    "agentDetectTimeoutMs": 5000,
-    "agentIdleTimeoutMs": 30000,
-    "afterOverlayCloseFocusMs": 400
+    "agentStartTimeoutMs": 30000,
+    "sessionNameTimeoutMs": 5000,
+    "shellReadyTimeoutMs": 5000
   }
 }
 ```
 
-The `agents` object is open-ended. Add any Herdr-detectable agent by giving it a
-lowercase key and a command. Set `renameCommand` to the slash command the agent
-uses for session renaming, or to an empty string when the command already names
-the session or the agent does not support renaming.
+Templates can use `{url}`, `{raw}`, `{repo}`, `{repoName}`, `{kind}`, `{nameKind}`,
+`{number}`, `{sessionName}`, and `{sessionId}`. `nameKind` maps GitHub's `pr` route
+to `pull`. `projectRepoName` identifies the destination through Herdr's workspace metadata;
+the matching main-checkout workspace must be open. The default harness and Codex
+rename command are configurable. Pi and Claude Code are named through their
+native `--name` startup flags.
 
-For example:
+## Requirements
 
-```json
-{
-  "defaultAgent": "opencode",
-  "agents": {
-    "opencode": {
-      "command": "opencode",
-      "renameCommand": ""
-    },
-    "gemini": {
-      "command": "gemini",
-      "renameCommand": ""
-    }
-  }
-}
-```
-
-Agent `command`, `renameCommand`, and the prompt, tab label, and session id
-templates can use `{url}`, `{raw}`, `{repo}`, `{repoName}`, `{kind}`, `{number}`,
-and `{sessionId}`. Values rendered into agent `command` are shell-quoted.
-
-## Notes
-
-- Requires Herdr `0.7.0` or newer.
-- Requires Node.js 18 or newer.
-- Uses no npm packages.
-- The agent pane starts through `herdr pane run`, not `herdr agent start`, so
-  exiting the configured agent returns to the shell instead of closing the pane.
-- The plugin waits for Herdr to detect the new agent pane, then waits for the
-  agent to report `idle` before sending the prompt or configured rename command.
-  Configured agent commands must start a Herdr-detectable agent. If your terminal
-  or agent starts slowly, increase values under `timing` in `config.json`.
-
+Requires Herdr 0.7.5 or newer and Node.js 18 or newer. Pi URL handoff requires
+the `pi-gh-context` extension. Pi starts normally through `herdr pane run`, so
+Herdr detects it without assigning a managed agent name. Other harnesses use
+`herdr agent start`; matching live sessions use `agent focus`. The plugin creates
+only the selected agent tab and does not add a viewer split.
