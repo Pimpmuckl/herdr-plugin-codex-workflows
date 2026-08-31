@@ -202,7 +202,7 @@ function project(runtime, phase, blocked = false, reason = "") {
 function projectTerminal(runtime, report) {
   const workspaceId = runtime.worktree.workspace.workspace_id;
   const paneId = runtime.worktree.root_pane.pane_id;
-  const stale = runtime.workflow === "pr" && report.status === "complete" && report["reviewed-head"] !== report["current-head"];
+  const stale = runtime.workflow === "pr" && report.status === "complete" && report["reviewed-head"].toLowerCase() !== report["current-head"].toLowerCase();
   const resultText = report.status === "complete" ? (stale ? "complete · head changed" : runtime.workflow === "issue" ? "complete · PR open" : "complete") : report.status;
   try {
     runHerdr(["workspace", "rename", workspaceId, `[${runtime.identity.shortLabel}] ${resultText}`]);
