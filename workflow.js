@@ -170,12 +170,12 @@ function makePipeName() {
 }
 
 function createPipeServer(pipeName, handlers) {
-  const sockets = new Set();
+  const sockets = new Map();
   const server = net.createServer((socket) => {
-    sockets.add(socket);
     const connection = {};
     let buffer = "";
     let chain = Promise.resolve();
+    sockets.set(socket, () => chain);
     socket.setEncoding("utf8");
     socket.on("data", (chunk) => {
       buffer += chunk;
@@ -184,21 +184,24 @@ function createPipeServer(pipeName, handlers) {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
         chain = chain.then(async () => {
+          let reply;
           try {
-            const reply = await handlers.message(JSON.parse(line), connection);
-            socket.write(`${JSON.stringify({ ok: true, ...reply })}\n`);
+            reply = { ok: true, ...await handlers.message(JSON.parse(line), connection) };
           } catch (error) {
-            socket.write(`${JSON.stringify({ ok: false, error: error.message })}\n`);
+            reply = { ok: false, error: error.message };
           }
+          await new Promise((resolve) => socket.write(`${JSON.stringify(reply)}\n`, resolve));
         });
       }
     });
     socket.on("error", () => socket.destroy()).on("close", () => { sockets.delete(socket); handlers.disconnect?.(connection); });
   });
-  server.shutdown = () => new Promise((resolve, reject) => {
-    server.close((error) => error ? reject(error) : resolve());
-    for (const socket of sockets) socket.destroy();
-  });
+  server.shutdown = async () => {
+    const closed = new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await Promise.allSettled([...sockets.values()].map((pending) => pending()));
+    for (const socket of sockets.keys()) socket.destroy();
+    return closed;
+  };
   return new Promise((resolve, reject) => {
     server.on("error", reject);
     server.listen(pipeName, () => resolve(server));
