@@ -188,7 +188,7 @@ function createPipeServer(pipeName, handlers) {
         });
       }
     });
-    socket.on("close", () => handlers.disconnect?.(connection));
+    socket.on("error", () => socket.destroy()).on("close", () => handlers.disconnect?.(connection));
   });
   return new Promise((resolve, reject) => {
     server.once("error", reject);

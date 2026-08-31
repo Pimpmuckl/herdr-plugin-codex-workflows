@@ -2,10 +2,8 @@
 "use strict";
 
 const fs = require("node:fs"), crypto = require("node:crypto");
-const path = require("node:path");
-const readline = require("node:readline");
-const readlinePromises = require("node:readline/promises");
-const { spawn, spawnSync } = require("node:child_process");
+const path = require("node:path"), readline = require("node:readline");
+const readlinePromises = require("node:readline/promises"), { spawn, spawnSync } = require("node:child_process");
 const { stdin: input, stdout: output } = require("node:process");
 const { issuePrompt, prPrompt } = require("./prompts.js");
 const {
@@ -294,7 +292,6 @@ function getAgent(name) {
 async function monitor(runtime) {
   let lastProjection = "";
   while (true) {
-    if (runtime.prompt?.error) throw runtime.prompt.error;
     if (!getWorkspace(runtime.worktree.workspace.workspace_id)) {
       runtime.terminal = { type: "terminal", status: "cancelled", reason: "workflow workspace was closed" };
     }
@@ -305,6 +302,8 @@ async function monitor(runtime) {
         projectTerminal(runtime, runtime.terminal);
         return;
       }
+    } else if (runtime.prompt?.error) {
+      throw runtime.prompt.error;
     } else if (!agent || (runtime.prompt?.finished && ["idle", "done"].includes(agent.agent_status))) {
       throw new Error("Codex parent exited without a structured terminal report");
     } else {
@@ -466,6 +465,7 @@ async function readPopupInput(promptText) {
     function finish(result) {
       input.off("keypress", onKey);
       input.setRawMode(false);
+      input.pause();
       output.write("\n");
       resolve(result);
     }
