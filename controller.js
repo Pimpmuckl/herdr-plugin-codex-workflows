@@ -37,12 +37,10 @@ function execute(command, args) {
 function compact(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
-
 function succeeds(command, args) {
   const result = spawnSync(command, args, { stdio: "ignore" });
   return !result.error && result.status === 0;
 }
-
 function runJson(command, args) {
   const stdout = execute(command, args);
   try {
@@ -51,11 +49,9 @@ function runJson(command, args) {
     throw new Error(`${command} returned non-JSON output`);
   }
 }
-
 function runHerdr(args) {
   return execute(herdr, args);
 }
-
 function runHerdrJson(args) {
   return runJson(herdr, args);
 }
@@ -365,6 +361,10 @@ async function controller(workflow) {
         project(runtime, report.phase, report.blocked, report.reason);
       } else {
         if (runtime.terminal) throw new Error("terminal report was already received");
+        if (workflow === "issue" && report.status === "complete") {
+          const target = parseTarget("pr", report["pr-url"], repository.repo), live = readJson(execute(gh, ["pr", "view", String(target.number), "--repo", repository.repo, "--json", "state,headRefOid"]));
+          if (!target.url || live?.state !== "OPEN" || live.headRefOid?.toLowerCase() !== report["head-sha"].toLowerCase()) throw new Error("terminal pull request is not open at the reported head");
+        }
         if (workflow === "pr" && report.status === "complete" && report["reviewed-head"].toLowerCase() !== runtime.headSha.toLowerCase()) throw new Error("terminal reviewed head does not match the pinned pull-request head");
         if (workflow === "pr" && report.status === "complete") report["current-head"] = currentPullRequestHead(repository, runtime.prNumber);
         runtime.terminal = report;
