@@ -137,6 +137,16 @@ test("pipe server consumes repeated server errors after listening", async (t) =>
   });
 });
 
+test("pipe shutdown destroys accepted connections", async (t) => {
+  const server = await createPipeServer(makePipeName(), { message() { return {}; } });
+  const client = await connectPipe(server.address());
+  t.after(() => { client.socket.destroy(); if (server.listening) server.close(); });
+  const closed = new Promise((resolve) => client.socket.once("close", resolve));
+  await server.shutdown();
+  await closed;
+  assert.equal(client.socket.destroyed, true);
+});
+
 test("popup connection lifetime exposes close-before-submit cancellation", async (t) => {
   const pipe = makePipeName();
   let disconnected;

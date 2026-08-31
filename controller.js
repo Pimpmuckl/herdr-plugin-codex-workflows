@@ -447,7 +447,7 @@ async function controller(workflow) {
     console.error(error.message);
     process.exitCode = 1;
   } finally {
-    server.close();
+    await server.shutdown();
   }
 }
 

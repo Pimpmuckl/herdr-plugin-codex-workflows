@@ -167,7 +167,9 @@ function makePipeName() {
 }
 
 function createPipeServer(pipeName, handlers) {
+  const sockets = new Set();
   const server = net.createServer((socket) => {
+    sockets.add(socket);
     const connection = {};
     let buffer = "";
     let chain = Promise.resolve();
@@ -188,7 +190,11 @@ function createPipeServer(pipeName, handlers) {
         });
       }
     });
-    socket.on("error", () => socket.destroy()).on("close", () => handlers.disconnect?.(connection));
+    socket.on("error", () => socket.destroy()).on("close", () => { sockets.delete(socket); handlers.disconnect?.(connection); });
+  });
+  server.shutdown = () => new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+    for (const socket of sockets) socket.destroy();
   });
   return new Promise((resolve, reject) => {
     server.on("error", reject);
