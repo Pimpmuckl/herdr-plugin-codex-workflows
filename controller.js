@@ -271,7 +271,14 @@ async function stopParent(runtime) {
     if (agent && !["idle", "done"].includes(agent.agent_status)) {
       runHerdr(["agent", "send-keys", runtime.identity.agentName, "ctrl+c"]);
       try { runHerdr(["agent", "wait", runtime.identity.agentName, "--until", "idle", "--until", "done", "--timeout", "30000"]); }
-      catch { runHerdr(["agent", "send-keys", runtime.identity.agentName, "ctrl+c"]); }
+      catch {
+        runHerdr(["agent", "send-keys", runtime.identity.agentName, "ctrl+c"]);
+        try { runHerdr(["agent", "wait", runtime.identity.agentName, "--until", "idle", "--until", "done", "--timeout", "5000"]); }
+        catch (error) {
+          const remaining = getAgent(runtime.identity.agentName);
+          if (remaining && !["idle", "done"].includes(remaining.agent_status)) throw error;
+        }
+      }
     }
   } finally {
     if (!runtime.prompt.finished) {
