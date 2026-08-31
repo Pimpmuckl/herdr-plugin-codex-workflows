@@ -355,7 +355,7 @@ async function controller(workflow) {
   let resolveHello;
   const inputPromise = new Promise((resolve) => { resolveInput = resolve; });
   const helloPromise = new Promise((resolve) => { resolveHello = resolve; });
-  const runtime = { workflow, repository, lifecycle, pipeName, phase: "investigating", terminal: null };
+  const runtime = { workflow, lifecycle, pipeName, phase: "investigating", terminal: null };
   const server = await createPipeServer(pipeName, {
     async message(message, connection) {
       if (message?.type === "hello") {
