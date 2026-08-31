@@ -114,7 +114,10 @@ function buildCodexArgs(workflow, worktree, mcp = {}) {
     "--sandbox", workflow === "pr" ? "read-only" : "danger-full-access",
     "--ask-for-approval", "never",
   ];
-  if (workflow === "pr") args.push("--config", "project_doc_max_bytes=0", "--disable", "apps", "--disable", "plugins");
+  if (workflow === "pr") args.push(
+    "--config", `projects.${JSON.stringify(worktree)}.trust_level="untrusted"`,
+    "--config", "project_doc_max_bytes=0", "--disable", "apps", "--disable", "plugins",
+  );
   for (const name of mcp.disabled || []) args.push("--config", `mcp_servers.${name}.enabled=false`);
   if (mcp.helper) args.push(
     "--config", `mcp_servers.${mcp.name}.command="node"`,
