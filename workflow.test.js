@@ -89,6 +89,7 @@ test("PR Codex launch enforces the read-only sandbox", () => {
   });
   assert.equal(args[args.indexOf("--sandbox") + 1], "read-only");
   assert.equal(args.includes("danger-full-access"), false);
+  assert.equal(args.includes("project_doc_max_bytes=0"), true);
   assert.deepEqual(args.slice(0, 4), ["--model", "gpt-5.6-sol", "--config", 'model_reasoning_effort="xhigh"']);
   assert.equal(args.includes("apps") && args.includes("plugins"), true);
   assert.equal(args.includes("mcp_servers.github.enabled=false"), true);
