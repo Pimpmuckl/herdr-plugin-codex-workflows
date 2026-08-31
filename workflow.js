@@ -155,7 +155,7 @@ function validateReport(workflow, report) {
   }
   const required = workflow === "issue"
     ? ["pr-url", "head-sha", "root-cause", "fix", "validation", "ponytail", "review-suite", "ci", "coderabbit", "greptile", "remaining-action"]
-    : ["purpose", "architecture", "minimality", "risks", "findings", "recommendations", "reviewed-head", "current-head"];
+    : ["purpose", "architecture", "minimality", "risks", "findings", "recommendations", "reviewed-head"];
   const missing = required.filter((field) => !compact(report[field]));
   if (missing.length) throw new Error(`terminal report missing: ${missing.join(", ")}`);
   return report;

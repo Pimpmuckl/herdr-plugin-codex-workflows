@@ -61,7 +61,7 @@ Required sequence:
 6. Report verifying. Call {"type":"query-current-head"} immediately before completion and record the returned SHA. If it changed, finish the pinned analysis but clearly mark it stale and recommend a new invocation.
 7. Print a concise terminal recap, then send exactly one structured terminal report.
 
-Success tool payload: {"type":"terminal","status":"complete","purpose":"<what and why>","architecture":"<ownership and boundaries>","minimality":"<assessment>","risks":"<risks or none>","findings":"<accepted and rejected>","recommendations":"<recommendations or none>","reviewed-head":"${input.headSha}","current-head":"<requeried sha>"}
+Success tool payload: {"type":"terminal","status":"complete","purpose":"<what and why>","architecture":"<ownership and boundaries>","minimality":"<assessment>","risks":"<risks or none>","findings":"<accepted and rejected>","recommendations":"<recommendations or none>","reviewed-head":"${input.headSha}"}
 Failure/cancellation payload: {"type":"terminal","status":"<failed|cancelled>","reason":"<specific reason>"}
 After a terminal report, become idle or exit normally. Idle alone is never success.
 `;
