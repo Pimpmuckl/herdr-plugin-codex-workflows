@@ -1,20 +1,32 @@
-id = "ogulcancelik.github-start"
-name = "GitHub Start"
-version = "0.2.0"
-min_herdr_version = "0.7.5"
-description = "Find, focus, resume, or start a named Pi, Codex, or Claude session."
-platforms = ["linux", "macos", "windows"]
+id = "pimpmuckl.codex-workflows"
+name = "Codex Workflows"
+version = "0.1.0"
+min_herdr_version = "0.8.2"
+description = "Turn issues into reviewed pull requests and understand pull requests in isolated Codex workspaces."
+platforms = ["windows"]
 
 [[actions]]
-id = "open"
-title = "Find named agent session"
+id = "issue-to-pr"
+title = "Issue to pull request"
 contexts = ["workspace", "tab", "pane"]
-command = ["node", "open.js"]
+command = ["node", "controller.js", "issue"]
+
+[[actions]]
+id = "understand-pr"
+title = "Understand pull request"
+contexts = ["workspace", "tab", "pane"]
+command = ["node", "controller.js", "pr"]
+
+[[actions]]
+id = "cleanup-current-workflow"
+title = "Clean up current Codex workflow"
+contexts = ["workspace", "tab", "pane"]
+command = ["node", "controller.js", "cleanup"]
 
 [[panes]]
-id = "prompt"
-title = "Find Named Session"
+id = "input"
+title = "Codex Workflow"
 placement = "popup"
 width = "80%"
-height = "70%"
-command = ["node", "prompt.js"]
+height = 10
+command = ["node", "controller.js", "popup"]
