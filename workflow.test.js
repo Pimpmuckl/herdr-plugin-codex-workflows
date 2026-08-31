@@ -128,6 +128,15 @@ test("two pipe identities carry independent invocation messages", async (t) => {
   ]);
 });
 
+test("pipe server consumes repeated server errors after listening", async (t) => {
+  const server = await createPipeServer(makePipeName(), { message() { return {}; } });
+  t.after(() => server.close());
+  assert.doesNotThrow(() => {
+    server.emit("error", new Error("first late server error"));
+    server.emit("error", new Error("second late server error"));
+  });
+});
+
 test("popup connection lifetime exposes close-before-submit cancellation", async (t) => {
   const pipe = makePipeName();
   let disconnected;

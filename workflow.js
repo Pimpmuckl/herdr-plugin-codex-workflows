@@ -191,7 +191,7 @@ function createPipeServer(pipeName, handlers) {
     socket.on("error", () => socket.destroy()).on("close", () => handlers.disconnect?.(connection));
   });
   return new Promise((resolve, reject) => {
-    server.once("error", reject);
+    server.on("error", reject);
     server.listen(pipeName, () => resolve(server));
   });
 }
