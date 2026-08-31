@@ -24,7 +24,6 @@ function readJson(value, fallback = null) {
     return fallback;
   }
 }
-
 function execute(command, args) {
   const result = spawnSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024 });
   if (result.error || result.status !== 0) {
@@ -35,7 +34,6 @@ function execute(command, args) {
   }
   return result.stdout.trim();
 }
-
 function compact(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
@@ -367,6 +365,8 @@ async function controller(workflow) {
         project(runtime, report.phase, report.blocked, report.reason);
       } else {
         if (runtime.terminal) throw new Error("terminal report was already received");
+        if (workflow === "pr" && report.status === "complete" && report["reviewed-head"].toLowerCase() !== runtime.headSha.toLowerCase()) throw new Error("terminal reviewed head does not match the pinned pull-request head");
+        if (workflow === "pr" && report.status === "complete") report["current-head"] = currentPullRequestHead(repository, runtime.prNumber);
         runtime.terminal = report;
       }
       return {};
@@ -395,7 +395,7 @@ async function controller(workflow) {
     } else {
       details = pullRequest(repository, target.number);
       identity = makeIdentity(workflow, target, details.headSha);
-      runtime.prNumber = details.prNumber;
+      runtime.prNumber = details.prNumber; runtime.headSha = details.headSha;
     }
     runtime.identity = identity;
     runtime.bridgeName = `herdr_workflow_${identity.agentName.slice(3)}`;
