@@ -265,6 +265,18 @@ async function startParent(runtime, prompt) {
   });
 }
 
+async function stopParent(runtime) {
+  const agent = getAgent(runtime.identity.agentName);
+  if (agent && !["idle", "done"].includes(agent.agent_status)) {
+    runHerdr(["agent", "send-keys", runtime.identity.agentName, "ctrl+c"]);
+    runHerdr(["agent", "wait", runtime.identity.agentName, "--until", "idle", "--until", "done"]);
+  }
+  if (!runtime.prompt.finished) {
+    const closed = new Promise((resolve) => runtime.prompt.child.once("close", resolve));
+    runtime.prompt.child.kill(); await closed;
+  }
+}
+
 function getWorkspace(workspaceId) {
   try {
     return runHerdrJson(["workspace", "get", workspaceId])?.result?.workspace || null;
@@ -291,7 +303,7 @@ async function monitor(runtime) {
     }
     const agent = getAgent(runtime.identity.agentName);
     if (runtime.terminal) {
-      if (runtime.terminal.status !== "complete" || !agent || ["idle", "done"].includes(agent.agent_status)) {
+      if (!agent || ["idle", "done"].includes(agent.agent_status)) {
         runtime.lifecycle.transition(runtime.terminal.status === "complete" ? "complete" : runtime.terminal.status === "cancelled" ? "cancel" : "fail");
         projectTerminal(runtime, runtime.terminal);
         return;
@@ -363,7 +375,7 @@ async function controller(workflow) {
         if (runtime.terminal) throw new Error("terminal report was already received");
         if (workflow === "issue" && report.status === "complete") {
           const target = parseTarget("pr", report["pr-url"], repository.repo), live = readJson(execute(gh, ["pr", "view", String(target.number), "--repo", repository.repo, "--json", "state,headRefOid,baseRefName,headRefName"]));
-          if (!target.url || live?.state !== "OPEN" || live.headRefOid?.toLowerCase() !== report["head-sha"].toLowerCase() || live.baseRefName !== runtime.baseBranch || live.headRefName !== runtime.identity.branch) throw new Error("terminal pull request is not open from the workflow branch at the reported head");
+          if (!target.url || live?.state !== "OPEN" || live.headRefOid?.toLowerCase() !== report["head-sha"].toLowerCase() || live.baseRefName !== runtime.baseBranch || live.headRefName !== runtime.identity.branch || !succeeds(gitBin, ["-C", runtime.worktree.path, "merge-base", "--is-ancestor", runtime.baseSha, report["head-sha"]])) throw new Error("terminal pull request does not connect the pinned base to the workflow branch at the reported head");
         }
         if (workflow === "pr" && report.status === "complete" && report["reviewed-head"].toLowerCase() !== runtime.headSha.toLowerCase()) throw new Error("terminal reviewed head does not match the pinned pull-request head");
         if (workflow === "pr" && report.status === "complete") report["current-head"] = currentPullRequestHead(repository, runtime.prNumber);
@@ -397,7 +409,7 @@ async function controller(workflow) {
       identity = makeIdentity(workflow, target, details.headSha);
       runtime.prNumber = details.prNumber; runtime.headSha = details.headSha;
     }
-    runtime.identity = identity; runtime.baseBranch = details.baseBranch;
+    runtime.identity = identity; runtime.baseBranch = details.baseBranch; runtime.baseSha = details.baseSha;
     runtime.bridgeName = `herdr_workflow_${identity.agentName.slice(3)}`;
     runtime.worktree = createWorktree(repository, identity, workflow === "issue" ? details.baseSha : details.headSha);
     project(runtime, "investigating");
@@ -414,6 +426,7 @@ async function controller(workflow) {
     project(runtime, "investigating");
     await monitor(runtime);
   } catch (error) {
+    if (runtime.prompt) await stopParent(runtime);
     if (!["COMPLETE", "FAILED", "CANCELLED"].includes(lifecycle.state)) lifecycle.transition("fail");
     if (runtime.worktree) {
       projectTerminal(runtime, { type: "terminal", status: "failed", reason: error.message });
