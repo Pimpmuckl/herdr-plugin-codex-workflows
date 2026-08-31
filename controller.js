@@ -362,8 +362,8 @@ async function controller(workflow) {
       } else {
         if (runtime.terminal) throw new Error("terminal report was already received");
         if (workflow === "issue" && report.status === "complete") {
-          const target = parseTarget("pr", report["pr-url"], repository.repo), live = readJson(execute(gh, ["pr", "view", String(target.number), "--repo", repository.repo, "--json", "state,headRefOid"]));
-          if (!target.url || live?.state !== "OPEN" || live.headRefOid?.toLowerCase() !== report["head-sha"].toLowerCase()) throw new Error("terminal pull request is not open at the reported head");
+          const target = parseTarget("pr", report["pr-url"], repository.repo), live = readJson(execute(gh, ["pr", "view", String(target.number), "--repo", repository.repo, "--json", "state,headRefOid,baseRefName,headRefName"]));
+          if (!target.url || live?.state !== "OPEN" || live.headRefOid?.toLowerCase() !== report["head-sha"].toLowerCase() || live.baseRefName !== runtime.baseBranch || live.headRefName !== runtime.identity.branch) throw new Error("terminal pull request is not open from the workflow branch at the reported head");
         }
         if (workflow === "pr" && report.status === "complete" && report["reviewed-head"].toLowerCase() !== runtime.headSha.toLowerCase()) throw new Error("terminal reviewed head does not match the pinned pull-request head");
         if (workflow === "pr" && report.status === "complete") report["current-head"] = currentPullRequestHead(repository, runtime.prNumber);
@@ -397,7 +397,7 @@ async function controller(workflow) {
       identity = makeIdentity(workflow, target, details.headSha);
       runtime.prNumber = details.prNumber; runtime.headSha = details.headSha;
     }
-    runtime.identity = identity;
+    runtime.identity = identity; runtime.baseBranch = details.baseBranch;
     runtime.bridgeName = `herdr_workflow_${identity.agentName.slice(3)}`;
     runtime.worktree = createWorktree(repository, identity, workflow === "issue" ? details.baseSha : details.headSha);
     project(runtime, "investigating");
