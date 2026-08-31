@@ -266,14 +266,18 @@ async function startParent(runtime, prompt) {
 }
 
 async function stopParent(runtime) {
-  const agent = getAgent(runtime.identity.agentName);
-  if (agent && !["idle", "done"].includes(agent.agent_status)) {
-    runHerdr(["agent", "send-keys", runtime.identity.agentName, "ctrl+c"]);
-    runHerdr(["agent", "wait", runtime.identity.agentName, "--until", "idle", "--until", "done"]);
-  }
-  if (!runtime.prompt.finished) {
-    const closed = new Promise((resolve) => runtime.prompt.child.once("close", resolve));
-    runtime.prompt.child.kill(); await closed;
+  try {
+    const agent = getAgent(runtime.identity.agentName);
+    if (agent && !["idle", "done"].includes(agent.agent_status)) {
+      runHerdr(["agent", "send-keys", runtime.identity.agentName, "ctrl+c"]);
+      try { runHerdr(["agent", "wait", runtime.identity.agentName, "--until", "idle", "--until", "done", "--timeout", "30000"]); }
+      catch { runHerdr(["agent", "send-keys", runtime.identity.agentName, "ctrl+c"]); }
+    }
+  } finally {
+    if (!runtime.prompt.finished) {
+      const closed = new Promise((resolve) => runtime.prompt.child.once("close", resolve));
+      runtime.prompt.child.kill(); await Promise.race([closed, delay(5000)]);
+    }
   }
 }
 
@@ -426,7 +430,7 @@ async function controller(workflow) {
     project(runtime, "investigating");
     await monitor(runtime);
   } catch (error) {
-    if (runtime.prompt) await stopParent(runtime);
+    if (runtime.prompt) try { await stopParent(runtime); } catch (stopError) { console.error(`parent shutdown failed: ${stopError.message}`); }
     if (!["COMPLETE", "FAILED", "CANCELLED"].includes(lifecycle.state)) lifecycle.transition("fail");
     if (runtime.worktree) {
       projectTerminal(runtime, { type: "terminal", status: "failed", reason: error.message });
