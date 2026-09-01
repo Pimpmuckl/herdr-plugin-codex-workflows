@@ -45,6 +45,7 @@ test("opens popup on Herdr's active pane without rejected target flags", () => {
   openInputPopup("pipe-1", "pr", "owner/repo", (value) => { args = value; });
   assert.equal(args.includes("--workspace"), false);
   assert.equal(args.includes("--target-pane"), false);
+  assert.equal(args[args.indexOf("--cwd") + 1], __dirname);
   assert.equal(args.at(-1), "--focus");
 });
 
