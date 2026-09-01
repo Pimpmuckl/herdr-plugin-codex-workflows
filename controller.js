@@ -268,7 +268,6 @@ async function startParent(runtime, prompt) {
   const paneId = runtime.worktree.root_pane.pane_id;
   await waitForShell(paneId);
   runHerdr(["agent", "start", runtime.identity.agentName, "--kind", "codex", "--pane", paneId]);
-  runtime.ownerSessionId = matchingSession([getAgent(runtime.identity.agentName)], runtime.worktree.workspace.workspace_id, paneId).agent_session.value;
   const child = spawn(herdr, ["agent", "prompt", runtime.identity.agentName, prompt, "--wait"], {
     stdio: ["ignore", "pipe", "pipe"],
   });
