@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
 const net = require("node:net");
 const test = require("node:test");
+const { openInputPopup } = require("./controller.js");
 const {
   Lifecycle,
   buildCodexArgs,
@@ -37,6 +38,14 @@ test("normalizes common GitHub origin forms", () => {
   assert.equal(parseGitHubRemote("git@github.com:Owner/Repo.git"), "owner/repo");
   assert.equal(parseGitHubRemote("https://github.com/Owner/Repo.git"), "owner/repo");
   assert.equal(parseGitHubRemote("ssh://git@github.com/Owner/Repo.git"), "owner/repo");
+});
+
+test("opens popup on Herdr's active pane without rejected target flags", () => {
+  let args;
+  openInputPopup("pipe-1", "pr", "owner/repo", (value) => { args = value; });
+  assert.equal(args.includes("--workspace"), false);
+  assert.equal(args.includes("--target-pane"), false);
+  assert.equal(args.at(-1), "--focus");
 });
 
 test("refuses local, path, Git worktree, and Herdr collisions", () => {
