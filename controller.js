@@ -540,10 +540,10 @@ async function controller(workflow) {
     const target = parseTarget(workflow, raw, repository.repo);
     runtime.launch.repo = target.repo;
     runtime.launch.repositorySource = target.repositorySource;
-    runtime.launch.step = 1;
-    await delay(0);
     requireGitHubAuth();
     repository = resolveRepository(target, repository);
+    runtime.launch.step = 1;
+    await delay(0);
     let details;
     let identity;
     if (workflow === "issue") {
