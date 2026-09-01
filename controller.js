@@ -151,7 +151,7 @@ function pullRequest(repository, number) {
   if (!data?.headRefOid || !data?.baseRefOid || Number(data.number) !== number) {
     throw new Error("GitHub did not return exact pull-request identities");
   }
-  const fetchedBase = fetchPinned(repository, `refs/heads/${data.baseRefName}`);
+  const fetchedBase = fetchPinned(repository, data.baseRefOid);
   if (fetchedBase.toLowerCase() !== data.baseRefOid.toLowerCase()) throw new Error(`fetched pull-request base ${fetchedBase} does not match ${data.baseRefOid}`);
   const fetched = fetchPinned(repository, `refs/pull/${number}/head`);
   if (fetched.toLowerCase() !== data.headRefOid.toLowerCase()) {
