@@ -415,6 +415,7 @@ async function monitor(runtime) {
 function openInputPopup(pipeName, workflow, repo, invoke = runHerdr) {
   const args = [
     "plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "input",
+    "--cwd", __dirname,
     "--env", `HERDR_CODEX_WORKFLOW_PIPE=${pipeName}`,
     "--env", `HERDR_CODEX_WORKFLOW_KIND=${workflow}`,
     "--env", `HERDR_CODEX_WORKFLOW_REPO=${repo}`,
