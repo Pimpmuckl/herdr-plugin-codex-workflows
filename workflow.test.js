@@ -1,22 +1,18 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { spawnSync } = require("node:child_process");
 const net = require("node:net");
 const path = require("node:path");
 const test = require("node:test");
 const { openInputPopup, progressView, resolveRepository } = require("./controller.js");
 const {
   Lifecycle,
-  buildCodexArgs,
   collisionReason,
   connectPipe,
   createPipeServer,
   makePipeName,
   parseGitHubRemote,
   parseTarget,
-  sendPipeMessage,
-  validateReport,
 } = require("./workflow.js");
 
 test("full links select their repository while shorthand stays current", () => {
@@ -119,54 +115,6 @@ test("controller lifecycle has explicit failure and cancellation terminals", () 
   assert.throws(() => complete.transition("fail"), /invalid controller transition/);
 });
 
-test("validates phase and complete terminal reports", () => {
-  assert.deepEqual(validateReport("issue", {
-    type: "phase", phase: "reviewing", blocked: true, reason: "needs approval",
-  }), { type: "phase", phase: "reviewing", blocked: true, reason: "needs approval" });
-  assert.throws(() => validateReport("issue", { type: "phase", phase: "coding" }), /invalid workflow phase/);
-  const terminal = { type: "terminal", status: "complete", "pr-url": "https://github.com/owner/repo/pull/1",
-    "head-sha": "abc", "root-cause": "race", fix: "serialize", validation: "node --test passed",
-    ponytail: "lean", "review-suite": "normal clean", ci: "green", coderabbit: "not installed",
-    greptile: "clean", "remaining-action": "none" };
-  assert.equal(validateReport("issue", terminal)["head-sha"], "abc");
-  assert.throws(
-    () => validateReport("issue", { type: "terminal", status: "complete", "pr-url": "x" }),
-    /terminal report missing/,
-  );
-  assert.throws(
-    () => validateReport("pr", { type: "terminal", status: "failed" }),
-    /require --reason/,
-  );
-});
-
-test("PR Codex launch is read-only and ignores head project instructions", () => {
-  const args = buildCodexArgs("pr", "C:\\worktree", {
-    helper: "C:\\plugin\\controller.js", pipe: "pipe-1", name: "herdr_workflow_deadbeef", disabled: ["github", "herdr_workflow"],
-  });
-  assert.equal(args[args.indexOf("--sandbox") + 1], "read-only");
-  assert.equal(args.includes("danger-full-access"), false);
-  assert.equal(args.includes('projects."C:\\\\worktree".trust_level="untrusted"'), true);
-  assert.equal(args.includes("project_doc_max_bytes=0"), true);
-  assert.deepEqual(args.slice(0, 4), ["--model", "gpt-5.6-sol", "--config", 'model_reasoning_effort="xhigh"']);
-  assert.equal(args.includes("apps") && args.includes("plugins"), true);
-  assert.equal(args.includes("mcp_servers.github.enabled=false"), true);
-  assert.equal(args.includes("mcp_servers.herdr_workflow.enabled=false"), true);
-  assert.equal(args.some((arg) => arg.includes("mcp_servers.herdr_workflow_deadbeef.args=")), true);
-});
-
-test("MCP helper exposes only the controller bridge", () => {
-  const requests = [
-    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } },
-    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
-  ].map(JSON.stringify).join("\n") + "\n";
-  const result = spawnSync(process.execPath, ["controller.js", "mcp", "unused", "pr"], { input: requests, encoding: "utf8" });
-  assert.equal(result.status, 0);
-  const replies = result.stdout.trim().split(/\r?\n/).map(JSON.parse);
-  assert.equal(replies[1].result.tools[0].name, "workflow");
-  assert.equal(replies[1].result.tools[0].annotations.readOnlyHint, true);
-  assert.equal(replies[1].result.tools.length, 1);
-});
-
 test("two pipe identities carry independent invocation messages", async (t) => {
   const firstPipe = makePipeName();
   const secondPipe = makePipeName();
@@ -176,13 +124,15 @@ test("two pipe identities carry independent invocation messages", async (t) => {
   const second = await createPipeServer(secondPipe, { message(message) { received[1].push(message); return {}; } });
   t.after(() => { first.close(); second.close(); });
 
+  const [firstClient, secondClient] = await Promise.all([connectPipe(firstPipe), connectPipe(secondPipe)]);
   await Promise.all([
-    sendPipeMessage(firstPipe, { type: "phase", phase: "planning" }),
-    sendPipeMessage(secondPipe, { type: "phase", phase: "reviewing" }),
+    firstClient.request({ type: "status" }),
+    secondClient.request({ type: "status" }),
   ]);
+  firstClient.socket.end(); secondClient.socket.end();
   assert.deepEqual(received, [
-    [{ type: "phase", phase: "planning" }],
-    [{ type: "phase", phase: "reviewing" }],
+    [{ type: "status" }],
+    [{ type: "status" }],
   ]);
 });
 

@@ -1,8 +1,7 @@
 # Herdr Codex Workflows
 
 Windows-only Herdr actions for turning an issue into an open pull request and
-for understanding an existing pull request in an isolated, read-only Codex
-workspace.
+for understanding an existing pull request in an isolated Codex workspace.
 
 ## Install
 
@@ -55,8 +54,8 @@ implementation, review, CI, and an open pull request. It never merges.
 
 `understand-pr` accepts a complete pull-request URL, partial link, or number
 with the same repository-selection rule. It checks out the exact head SHA on a
-synthetic local branch and starts Codex with an enforced read-only sandbox. It
-never pushes or posts to GitHub.
+synthetic local branch and tells the native Codex agent to perform a read-only
+review. It never pushes or posts to GitHub.
 
 For a full link to another repository, the plugin reuses a matching
 `C:\Code\<repo>` checkout when present. Otherwise it clones to
@@ -64,9 +63,11 @@ For a full link to another repository, the plugin reuses a matching
 
 ## Lifecycle and cleanup
 
-Each action invocation has its own controller process and Windows named pipe.
-Its state is only in memory: `COLLECTING -> PROVISIONING -> RUNNING ->` a
-terminal result. Concurrent invocations do not share a queue or registry.
+Each action invocation has its own controller process and Windows named pipe
+for its popup. Its state is only in memory: `COLLECTING -> PROVISIONING ->
+RUNNING ->` a terminal result. Concurrent invocations do not share a queue or
+registry. The controller uses Herdr's native `agent start` and `agent prompt`
+lifecycle without injecting Codex command-line configuration.
 
 After a successful workflow, the controller exits the owning Codex process,
 releases its Herdr command slot, and leaves the exact session ready to archive.

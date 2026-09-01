@@ -4,15 +4,6 @@ const crypto = require("node:crypto"), net = require("node:net");
 const os = require("node:os"), path = require("node:path");
 const WORKTREE_ROOT = "C:\\Code\\.worktrees";
 
-const phases = new Set([
-  "investigating",
-  "planning",
-  "implementing",
-  "verifying",
-  "reviewing",
-  "ci-reviewers",
-]);
-
 function compact(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
@@ -123,26 +114,6 @@ function parseWorktreeList(content) {
   return entries;
 }
 
-function buildCodexArgs(workflow, worktree, mcp = {}) {
-  const args = [
-    "--model", "gpt-5.6-sol",
-    "--config", 'model_reasoning_effort="xhigh"',
-    "--cd", worktree,
-    "--sandbox", workflow === "pr" ? "read-only" : "danger-full-access",
-    "--ask-for-approval", "never",
-  ];
-  if (workflow === "pr") args.push(
-    "--config", `projects.${JSON.stringify(worktree)}.trust_level="untrusted"`,
-    "--config", "project_doc_max_bytes=0", "--disable", "apps", "--disable", "plugins",
-  );
-  for (const name of mcp.disabled || []) args.push("--config", `mcp_servers.${name}.enabled=false`);
-  if (mcp.helper) args.push(
-    "--config", `mcp_servers.${mcp.name}.command="node"`,
-    "--config", `mcp_servers.${mcp.name}.args=${JSON.stringify([mcp.helper, "mcp", mcp.pipe, workflow])}`,
-  );
-  return args;
-}
-
 class Lifecycle {
   constructor() {
     this.state = "COLLECTING";
@@ -158,27 +129,6 @@ class Lifecycle {
     this.state = next;
     return next;
   }
-}
-
-function validateReport(workflow, report) {
-  if (report?.type === "phase") {
-    if (!phases.has(report.phase)) throw new Error(`invalid workflow phase: ${report.phase}`);
-    if (report.blocked && !report.reason) throw new Error("blocked reports require a reason");
-    return report;
-  }
-  if (report?.type !== "terminal" || !["complete", "failed", "cancelled"].includes(report.status)) {
-    throw new Error("invalid terminal report");
-  }
-  if (report.status !== "complete") {
-    if (!report.reason) throw new Error(`${report.status} reports require --reason`);
-    return report;
-  }
-  const required = workflow === "issue"
-    ? ["pr-url", "head-sha", "root-cause", "fix", "validation", "ponytail", "review-suite", "ci", "coderabbit", "greptile", "remaining-action"]
-    : ["purpose", "architecture", "minimality", "risks", "findings", "recommendations", "reviewed-head"];
-  const missing = required.filter((field) => !compact(report[field]));
-  if (missing.length) throw new Error(`terminal report missing: ${missing.join(", ")}`);
-  return report;
 }
 
 function makePipeName() {
@@ -255,13 +205,5 @@ function connectPipe(pipeName) {
   });
 }
 
-async function sendPipeMessage(pipeName, message) {
-  const client = await connectPipe(pipeName);
-  const reply = await client.request(message);
-  client.socket.end();
-  if (!reply.ok) throw new Error(reply.error || "controller rejected report");
-  return reply;
-}
-
-module.exports = { Lifecycle, WORKTREE_ROOT, buildCodexArgs, collisionReason, connectPipe, createPipeServer, makeIdentity,
-  makePipeName, normalizePath, parseGitHubRemote, parseSameRepositoryTarget, parseTarget, parseWorktreeList, sendPipeMessage, validateReport };
+module.exports = { Lifecycle, WORKTREE_ROOT, collisionReason, connectPipe, createPipeServer, makeIdentity,
+  makePipeName, normalizePath, parseGitHubRemote, parseSameRepositoryTarget, parseTarget, parseWorktreeList };
