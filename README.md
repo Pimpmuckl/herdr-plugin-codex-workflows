@@ -62,14 +62,26 @@ Each action invocation has its own controller process and Windows named pipe.
 Its state is only in memory: `COLLECTING -> PROVISIONING -> RUNNING ->` a
 terminal result. Concurrent invocations do not share a queue or registry.
 
-Success, failure, and cancellation leave the workspace, branch, worktree, and
-transcript intact. Run `cleanup-current-workflow` from that workflow workspace
-to remove only a terminal, clean, inactive plugin worktree under
-`C:\Code\.worktrees`. Cleanup never uses force and leaves the branch.
+After a successful workflow, the controller exits the owning Codex process,
+releases its Herdr command slot, and leaves the exact session ready to archive.
+A detached watcher waits for the associated pull request. An open pull request
+keeps the workspace intact. A closed, unmerged pull request also keeps it and
+stops the watcher. When GitHub reports an unambiguous merge, cleanup first exits
+and archives the exact owning Codex session, then rechecks the local identity and
+cleanliness and asks Herdr to remove the workspace and worktree without force.
+The workflow branch remains.
 
-A Herdr or machine restart loses the controller and its terminal metadata. The
-plugin does not reconstruct or resume workflows after restart, and conservative
-cleanup then refuses; use Herdr's native worktree controls after inspection.
+Failure and cancellation keep all workflow state. The
+`cleanup-current-workflow` action uses the same archive-first transaction for a
+terminal workflow without waiting for a merge. It refuses a changed identity,
+dirty worktree, active controller or agent, path outside
+`C:\Code\.worktrees`, or an ambiguous Codex session. An archive failure removes
+nothing; a failure after archive keeps the worktree for manual inspection.
 
-Non-goals are persistent workflow state, dashboards, automatic recovery,
-cross-repository references, automatic merge, and automatic cleanup.
+A Herdr or machine restart loses an active watcher. The plugin has no registry
+or startup recovery and does not reconstruct the wait after restart. Use the
+manual cleanup action after inspection when its safety checks still pass.
+
+Non-goals are persistent workflow state, dashboards, background services,
+automatic recovery, cross-repository references, automatic merge, force
+removal, and workflow-branch deletion.

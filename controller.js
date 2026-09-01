@@ -7,16 +7,19 @@ const readlinePromises = require("node:readline/promises"), { spawn, spawnSync }
 const { stdin: input, stdout: output } = require("node:process");
 const { issuePrompt, prPrompt } = require("./prompts.js");
 const {
-  Lifecycle, buildCodexArgs, collisionReason, connectPipe, createPipeServer, makeIdentity,
-  makePipeName, normalizePath, parseGitHubRemote, parseTarget, parseWorktreeList,
+  associatedPr, cleanupTransaction, decodePayload, handoffWatcher, manualWorkspace, matchingOwnedSession, matchingSession, watch, withCleanupClaim,
+} = require("./cleanup.js");
+const {
+  Lifecycle, WORKTREE_ROOT, buildCodexArgs, collisionReason, connectPipe, createPipeServer, makeIdentity,
+  makePipeName, parseGitHubRemote, parseTarget, parseWorktreeList,
   sendPipeMessage, validateReport,
 } = require("./workflow.js");
 
 const PLUGIN_ID = "pimpmuckl.codex-workflows";
 const METADATA_SOURCE = "plugin:pimpmuckl.codex-workflows";
-const WORKTREE_ROOT = "C:\\Code\\.worktrees";
 const herdr = process.env.HERDR_BIN_PATH || "herdr", gitBin = process.env.GIT_BIN_PATH || "git";
-const gh = process.env.GH_BIN_PATH || "gh", pluginRoot = process.env.HERDR_PLUGIN_ROOT || __dirname;
+const gh = process.env.GH_BIN_PATH || "gh", codexBin = process.env.CODEX_BIN_PATH;
+const pluginRoot = process.env.HERDR_PLUGIN_ROOT || __dirname;
 function readJson(value, fallback = null) {
   try {
     return JSON.parse(value);
@@ -54,6 +57,10 @@ function runHerdr(args) {
 }
 function runHerdrJson(args) {
   return runJson(herdr, args);
+}
+
+function runCodex(args) {
+  return codexBin ? execute(codexBin, args) : execute(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "codex", ...args]);
 }
 
 function git(cwd, args) {
@@ -131,10 +138,19 @@ function pullRequest(repository, number) {
 
 function githubSnapshot(repository, number) {
   return readJson(execute(gh, ["pr", "view", String(number), "--repo", repository.repo, "--json",
-    "number,title,body,url,author,baseRefName,baseRefOid,headRefName,headRefOid,statusCheckRollup,reviews,comments,files"]));
+    "number,title,body,url,author,baseRefName,baseRefOid,headRefName,headRefOid"]));
 }
-function githubReviewComments(repository, number, page) {
-  return readJson(execute(gh, ["api", "--method", "GET", `repos/${repository.repo}/pulls/${number}/comments`, "-f", "per_page=50", "-f", `page=${page}`]));
+function githubReviewPage(repository, number, headSha, page) {
+  const requests = [
+    ["reviewComments", `repos/${repository.repo}/pulls/${number}/comments`, "[.[] | {id,user:.user.login,body:((.body // \"\")[0:4000]),bodyOmittedCharacters:([((.body // \"\")|length)-4000,0]|max),path,line,commit_id,html_url}]"],
+    ["reviews", `repos/${repository.repo}/pulls/${number}/reviews`, "[.[] | {id,user:.user.login,state,body:((.body // \"\")[0:4000]),bodyOmittedCharacters:([((.body // \"\")|length)-4000,0]|max),submitted_at,commit_id,html_url}]"],
+    ["comments", `repos/${repository.repo}/issues/${number}/comments`, "[.[] | {id,user:.user.login,body:((.body // \"\")[0:4000]),bodyOmittedCharacters:([((.body // \"\")|length)-4000,0]|max),created_at,updated_at,html_url}]"],
+    ["files", `repos/${repository.repo}/pulls/${number}/files`, "[.[] | {filename,status,additions,deletions,changes,previous_filename}]"],
+    ["checks", `repos/${repository.repo}/commits/${headSha}/check-runs`, "[.check_runs[] | {name,status,conclusion,started_at,completed_at,html_url}]"],
+    ["statuses", `repos/${repository.repo}/commits/${headSha}/statuses`, "[.[] | {context,state,description,target_url,created_at,updated_at}]"],
+  ];
+  return Object.fromEntries(requests.map(([name, endpoint, jq]) => [name, readJson(execute(gh,
+    ["api", "--method", "GET", endpoint, "-f", "per_page=10", "-f", `page=${page}`, "--jq", jq]))]));
 }
 function currentPullRequestHead(repository, number) {
   const value = readJson(execute(gh, ["pr", "view", String(number), "--repo", repository.repo, "--json", "headRefOid"]));
@@ -199,9 +215,12 @@ function project(runtime, phase, blocked = false, reason = "") {
   }
 }
 
-function projectTerminal(runtime, report) {
+function projectTerminal(runtime, report, candidate = getAgent(runtime.identity.agentName)) {
   const workspaceId = runtime.worktree.workspace.workspace_id;
   const paneId = runtime.worktree.root_pane.pane_id;
+  let owner = null;
+  try { owner = candidate && matchingSession([candidate], workspaceId, paneId); } catch {}
+  if (owner) runtime.ownerSessionId = owner.agent_session.value;
   const stale = runtime.workflow === "pr" && report.status === "complete" && report["reviewed-head"].toLowerCase() !== report["current-head"].toLowerCase();
   const resultText = report.status === "complete" ? (stale ? "complete · head changed" : runtime.workflow === "issue" ? "complete · PR open" : "complete") : report.status;
   try {
@@ -209,8 +228,9 @@ function projectTerminal(runtime, report) {
     runHerdr([
       "workspace", "report-metadata", workspaceId, "--source", METADATA_SOURCE,
       "--token", `workflow_state=${report.status}`,
-      "--token", "workflow_controller=inactive",
+      "--token", `workflow_controller=${report.status === "complete" ? "active" : "inactive"}`,
       "--token", `workflow_phase=${resultText}`,
+      ...(runtime.ownerSessionId ? ["--token", `workflow_root_pane=${paneId}`, "--token", `workflow_session=${runtime.ownerSessionId}`] : []),
     ]);
     runHerdr(["pane", "rename", paneId, `${runtime.identity.shortLabel} Codex parent`]);
   } catch (error) {
@@ -224,7 +244,7 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function waitForShell(paneId) {
+async function waitForShell(paneId, cwd) {
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     try {
@@ -232,7 +252,8 @@ async function waitForShell(paneId) {
       if (info?.shell_pid
         && info.foreground_process_group_id === info.shell_pid
         && info.foreground_processes?.length === 1
-        && info.foreground_processes[0].pid === info.shell_pid) return;
+        && info.foreground_processes[0].pid === info.shell_pid
+        && (!cwd || path.resolve(info.foreground_processes[0].cwd || "").toLowerCase() === path.resolve(cwd).toLowerCase())) return;
     } catch {
       // New pane shells can take a moment to appear.
     }
@@ -251,6 +272,7 @@ async function startParent(runtime, prompt) {
       disabled: runtime.workflow === "pr" ? configuredMcpNames() : [],
     }),
   ]);
+  runtime.ownerSessionId = matchingSession([getAgent(runtime.identity.agentName)], runtime.worktree.workspace.workspace_id, paneId).agent_session.value;
   const child = spawn(herdr, ["agent", "prompt", runtime.identity.agentName, prompt, "--wait"], {
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -306,6 +328,64 @@ function getAgent(name) {
   }
 }
 
+function listAgents() {
+  return runHerdrJson(["agent", "list"])?.result?.agents || [];
+}
+
+function projectCleanup(workspaceId, state) {
+  if (!getWorkspace(workspaceId)) return;
+  runHerdr([
+    "workspace", "report-metadata", workspaceId, "--source", METADATA_SOURCE,
+    "--token", "workflow_controller=inactive", "--token", `workflow_cleanup=${state}`,
+  ]);
+}
+
+function cleanupOps(workspaceId) {
+  return {
+    workspace: async (workspaceId) => getWorkspace(workspaceId),
+    agents: async () => listAgents(),
+    git: async (cwd, args) => git(cwd, args),
+    pullRequest: async (repo, number) => readJson(execute(gh, ["pr", "view", String(number), "--repo", repo, "--json", "state,mergedAt"])),
+    archive: async (sessionId) => runCodex(["archive", sessionId]),
+    remove: async (workspaceId) => runHerdr(["worktree", "remove", "--workspace", workspaceId]),
+    project: async (state) => projectCleanup(workspaceId, state),
+    notify: async (title, body) => notify(title, body, title === "Codex workflow cleaned up" ? "done" : "request"),
+    delay,
+  };
+}
+
+async function handoffCleanup(runtime, repository) {
+  const workspaceId = runtime.worktree.workspace.workspace_id;
+  const rootPaneId = runtime.worktree.root_pane.pane_id;
+  const payload = {
+    version: 1, workflow: runtime.workflow, workspaceId, rootPaneId,
+    worktreePath: runtime.worktree.path, repoRoot: repository.root, repo: repository.repo,
+    branch: runtime.identity.branch, sessionId: runtime.ownerSessionId,
+    prNumber: associatedPr(runtime.workflow, runtime.terminal, runtime.prNumber, repository.repo),
+  };
+  await handoffWatcher(__filename, payload, async () => {
+    runHerdr([
+      "workspace", "report-metadata", workspaceId, "--source", METADATA_SOURCE,
+      "--token", "workflow_state=complete", "--token", "workflow_controller=inactive",
+      "--token", `workflow_branch=${runtime.identity.branch}`, "--token", "workflow_cleanup=waiting",
+    ]);
+  });
+  notify("Codex workflow waiting for PR merge", "The workspace will be cleaned up after this pull request merges.");
+}
+
+async function releaseParent(runtime) {
+  const paneId = runtime.worktree.root_pane.pane_id;
+  const rootAgents = listAgents().filter((agent) => agent.workspace_id === runtime.worktree.workspace.workspace_id && agent.pane_id === paneId);
+  if (rootAgents.length) {
+    matchingOwnedSession(rootAgents, runtime.worktree.workspace.workspace_id, paneId, runtime.ownerSessionId);
+    runHerdr(["agent", "prompt", runtime.identity.agentName, "/quit"]);
+  }
+  await waitForShell(paneId);
+  const outsideCwd = path.parse(path.resolve(runtime.worktree.path)).root;
+  runHerdr(["pane", "run", paneId, `cd ${outsideCwd}`]);
+  await waitForShell(paneId, outsideCwd);
+}
+
 async function monitor(runtime) {
   let lastProjection = "";
   while (true) {
@@ -316,7 +396,7 @@ async function monitor(runtime) {
     if (runtime.terminal) {
       if (!agent || ["idle", "done"].includes(agent.agent_status)) {
         runtime.lifecycle.transition(runtime.terminal.status === "complete" ? "complete" : runtime.terminal.status === "cancelled" ? "cancel" : "fail");
-        projectTerminal(runtime, runtime.terminal);
+        projectTerminal(runtime, runtime.terminal, agent);
         return;
       }
     } else if (runtime.prompt?.error) {
@@ -373,9 +453,9 @@ async function controller(workflow) {
       }
       if (lifecycle.state !== "RUNNING") throw new Error("workflow parent is not running");
       if (workflow === "pr" && message?.type === "query-github") return { snapshot: githubSnapshot(repository, runtime.prNumber) };
-      if (workflow === "pr" && message?.type === "query-review-comments") {
-        if (!Number.isInteger(message.page) || message.page < 1) throw new Error("review-comments page must be a positive integer");
-        return { comments: githubReviewComments(repository, runtime.prNumber, message.page) };
+      if (workflow === "pr" && message?.type === "query-review-page") {
+        if (!Number.isInteger(message.page) || message.page < 1) throw new Error("review page must be a positive integer");
+        return { page: githubReviewPage(repository, runtime.prNumber, runtime.headSha, message.page) };
       }
       if (workflow === "pr" && message?.type === "query-current-head") return { headSha: currentPullRequestHead(repository, runtime.prNumber) };
       const report = validateReport(workflow, message);
@@ -436,11 +516,25 @@ async function controller(workflow) {
     lifecycle.transition("provisioned");
     project(runtime, "investigating");
     await monitor(runtime);
+    let releaseError = null;
+    try { await releaseParent(runtime); } catch (error) { releaseError = error; console.error(`parent release failed: ${error.message}`); }
+    if (runtime.terminal?.status === "complete") {
+      try {
+        if (releaseError) throw releaseError;
+        await handoffCleanup(runtime, repository);
+      }
+      catch (error) {
+        try { projectCleanup(runtime.worktree.workspace.workspace_id, "stopped"); } catch (projectError) { console.error(`cleanup metadata update failed: ${projectError.message}`); }
+        notify("Codex workflow cleanup stopped", "Automatic cleanup could not be armed; the workspace and branch remain.");
+        console.error(`cleanup handoff failed: ${error.message}`);
+      }
+    }
   } catch (error) {
     if (runtime.prompt) try { await stopParent(runtime); } catch (stopError) { console.error(`parent shutdown failed: ${stopError.message}`); }
     if (!["COMPLETE", "FAILED", "CANCELLED"].includes(lifecycle.state)) lifecycle.transition("fail");
     if (runtime.worktree) {
       projectTerminal(runtime, { type: "terminal", status: "failed", reason: error.message });
+      try { await releaseParent(runtime); } catch (releaseError) { console.error(`parent release failed: ${releaseError.message}`); }
     } else {
       notify("Codex workflow failed", error.message);
     }
@@ -526,10 +620,10 @@ async function mcp(pipeName, workflow) {
       };
       else if (request.method === "tools/list") result = { tools: [{
         name: "workflow",
-        description: "Report a phase or terminal result, or query PR data through the Herdr controller. Types: phase, terminal, query-github, query-review-comments, query-current-head.",
+        description: "Report a phase or terminal result, or query PR data through the Herdr controller. Types: phase, terminal, query-github, query-review-page, query-current-head.",
         annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
         inputSchema: { type: "object", required: ["type"], additionalProperties: true, properties: {
-          type: { type: "string", enum: ["phase", "terminal", "query-github", "query-review-comments", "query-current-head"] },
+          type: { type: "string", enum: ["phase", "terminal", "query-github", "query-review-page", "query-current-head"] },
           phase: { type: "string" }, blocked: { type: "boolean" }, reason: { type: "string" },
           status: { type: "string", enum: ["complete", "failed", "cancelled"] }, page: { type: "integer", minimum: 1 },
         } },
@@ -538,7 +632,7 @@ async function mcp(pipeName, workflow) {
         const message = request.params.arguments || {};
         const reply = await sendPipeMessage(pipeName, message);
         const text = message.type === "query-current-head" ? reply.headSha
-          : JSON.stringify(reply.snapshot || reply.comments || { acknowledged: true });
+          : JSON.stringify(reply.snapshot || reply.page || { acknowledged: true });
         result = { content: [{ type: "text", text }], structuredContent: reply };
       } else if (request.method === "ping") result = {};
       else throw new Error(`unsupported MCP method: ${request.method}`);
@@ -549,26 +643,40 @@ async function mcp(pipeName, workflow) {
   }
 }
 
-function cleanup() {
+async function cleanup() {
   const context = readJson(process.env.HERDR_PLUGIN_CONTEXT_JSON, {});
   if (!context.workspace_id) throw new Error("cleanup requires a current workflow workspace");
-  const workspace = runHerdrJson(["workspace", "get", context.workspace_id])?.result?.workspace;
-  const worktree = workspace?.worktree;
-  const tokens = workspace?.tokens || {};
-  if (!worktree?.is_linked_worktree || !["complete", "failed", "cancelled"].includes(tokens.workflow_state)) {
-    throw new Error("current workspace has no terminal Codex workflow metadata");
-  }
-  if (tokens.workflow_controller !== "inactive") throw new Error("workflow controller is still active");
-  const liveAgents = runHerdrJson(["agent", "list"])?.result?.agents || [];
-  if (liveAgents.some((agent) => agent.workspace_id === context.workspace_id && !["idle", "done"].includes(agent.agent_status))) throw new Error("workflow workspace still has an active agent");
-  const expectedRoot = normalizePath(path.join(WORKTREE_ROOT, parseGitHubRemote(git(worktree.checkout_path, ["remote", "get-url", "origin"])).split("/").pop()));
-  const checkout = normalizePath(worktree.checkout_path);
-  if (!checkout.startsWith(`${expectedRoot}${path.sep}`)) throw new Error("workflow worktree is outside the managed root");
+  const workspace = getWorkspace(context.workspace_id);
+  const { worktree, tokens } = manualWorkspace(workspace);
   const branch = git(worktree.checkout_path, ["branch", "--show-current"]);
-  if (!/^codex\/(?:issue|task|review-pr)-/.test(branch)) throw new Error("branch is not owned by this plugin");
-  if (git(worktree.checkout_path, ["status", "--porcelain"])) throw new Error("workflow worktree has uncommitted changes");
-  runHerdr(["worktree", "remove", "--workspace", context.workspace_id]);
-  notify("Codex workflow cleaned up", `Removed ${worktree.checkout_path}; branch ${branch} remains.`, "done");
+  const payload = {
+    version: 1, workflow: tokens.workflow_kind, workspaceId: context.workspace_id,
+    rootPaneId: tokens.workflow_root_pane, worktreePath: worktree.checkout_path, repoRoot: worktree.repo_root,
+    repo: parseGitHubRemote(git(worktree.checkout_path, ["remote", "get-url", "origin"])),
+    branch, sessionId: tokens.workflow_session, prNumber: null,
+  };
+  const result = await withCleanupClaim(payload, async () => {
+    projectCleanup(context.workspace_id, "manual");
+    return cleanupTransaction(payload, cleanupOps(context.workspace_id), false, true);
+  });
+  if (result.status === "removed") return notify("Codex workflow cleaned up", `Archived its Codex session and removed ${worktree.checkout_path}; branch ${branch} remains.`, "done");
+  if (result.status === "missing") return;
+  if (result.status === "busy") {
+    notify("Codex workflow cleanup stopped", result.reason);
+    throw new Error(result.reason);
+  }
+  projectCleanup(context.workspace_id, result.status);
+  notify(result.status === "partial" ? "Codex workflow partially cleaned up" : "Codex workflow cleanup stopped", result.reason);
+  throw new Error(result.reason);
+}
+
+async function watcher(encodedPayload) {
+  const payload = decodePayload(encodedPayload);
+  if (typeof process.send !== "function") throw new Error("cleanup watcher requires its controller IPC channel");
+  const disconnected = new Promise((resolve) => process.once("disconnect", resolve));
+  await new Promise((resolve, reject) => process.send({ type: "armed" }, (error) => error ? reject(error) : resolve()));
+  await disconnected;
+  return watch(payload, cleanupOps(payload.workspaceId));
 }
 
 async function main() {
@@ -577,7 +685,8 @@ async function main() {
   if (mode === "popup") return popup();
   if (mode === "mcp") return mcp(args[0], args[1]);
   if (mode === "cleanup") return cleanup();
-  throw new Error("expected issue, pr, popup, mcp, or cleanup mode");
+  if (mode === "watch") return watcher(args[0]);
+  throw new Error("expected issue, pr, popup, mcp, cleanup, or watch mode");
 }
 
 if (require.main === module) {

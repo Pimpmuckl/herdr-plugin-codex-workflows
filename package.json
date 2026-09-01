@@ -3,6 +3,6 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "check": "node --check controller.js && node --check workflow.js && node --check prompts.js && node --test"
+    "check": "node --check controller.js && node --check workflow.js && node --check cleanup.js && node --check prompts.js && node --test"
   }
 }

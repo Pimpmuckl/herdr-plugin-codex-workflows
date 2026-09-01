@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto"), net = require("node:net");
 const os = require("node:os"), path = require("node:path");
+const WORKTREE_ROOT = "C:\\Code\\.worktrees";
 
 const phases = new Set([
   "investigating",
@@ -246,5 +247,5 @@ async function sendPipeMessage(pipeName, message) {
   return reply;
 }
 
-module.exports = { Lifecycle, buildCodexArgs, collisionReason, connectPipe, createPipeServer, makeIdentity,
+module.exports = { Lifecycle, WORKTREE_ROOT, buildCodexArgs, collisionReason, connectPipe, createPipeServer, makeIdentity,
   makePipeName, normalizePath, parseGitHubRemote, parseTarget, parseWorktreeList, sendPipeMessage, validateReport };
