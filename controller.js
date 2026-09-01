@@ -412,17 +412,15 @@ async function monitor(runtime) {
   }
 }
 
-function openInputPopup(context, pipeName, workflow, repo) {
+function openInputPopup(pipeName, workflow, repo, invoke = runHerdr) {
   const args = [
     "plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "input",
     "--env", `HERDR_CODEX_WORKFLOW_PIPE=${pipeName}`,
     "--env", `HERDR_CODEX_WORKFLOW_KIND=${workflow}`,
     "--env", `HERDR_CODEX_WORKFLOW_REPO=${repo}`,
+    "--focus",
   ];
-  if (context.workspace_id) args.push("--workspace", context.workspace_id);
-  if (context.focused_pane_id) args.push("--target-pane", context.focused_pane_id);
-  args.push("--focus");
-  runHerdr(args);
+  invoke(args);
 }
 
 async function controller(workflow) {
@@ -483,7 +481,7 @@ async function controller(workflow) {
   });
 
   try {
-    openInputPopup(context, pipeName, workflow, repository.repo);
+    openInputPopup(pipeName, workflow, repository.repo);
     await Promise.race([helloPromise, delay(30000).then(() => { throw new Error("input popup did not connect to its controller"); })]);
     const raw = await inputPromise;
     if (raw === null) return;
@@ -688,6 +686,8 @@ async function main() {
   if (mode === "watch") return watcher(args[0]);
   throw new Error("expected issue, pr, popup, mcp, cleanup, or watch mode");
 }
+
+module.exports = { openInputPopup };
 
 if (require.main === module) {
   main().catch((error) => {
