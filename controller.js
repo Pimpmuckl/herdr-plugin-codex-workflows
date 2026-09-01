@@ -192,13 +192,8 @@ function createWorktree(repository, identity, baseSha) {
   return { ...result, path: worktree };
 }
 
-function phaseText(phase, blocked = false) {
-  const friendly = phase === "ci-reviewers" ? "CI and reviewers" : phase.replace(/-/g, " ");
-  return blocked ? `${friendly} · blocked` : friendly;
-}
-
-function project(runtime, phase, blocked = false, reason = "") {
-  const text = phaseText(phase, blocked);
+function project(runtime, blocked = false, reason = "") {
+  const phase = "working", text = blocked ? "working · blocked" : phase;
   const workspaceId = runtime.worktree.workspace.workspace_id;
   const paneId = runtime.worktree.root_pane.pane_id;
   try {
@@ -430,7 +425,7 @@ async function monitor(runtime, repository) {
       return;
     } else {
       const key = agent.agent_status;
-      if (key !== lastProjection && agent.agent_status === "blocked") project(runtime, "working", true, "Codex needs input");
+      if (key !== lastProjection && agent.agent_status === "blocked") project(runtime, true, "Codex needs input");
       lastProjection = key;
     }
     await delay(1000);
@@ -533,7 +528,7 @@ async function controller(workflow) {
     runtime.launch.step = 2;
     await delay(0);
     runtime.worktree = createWorktree(repository, identity, workflow === "issue" ? details.baseSha : details.headSha);
-    project(runtime, "working");
+    project(runtime);
     const promptData = {
       repo: repository.repo,
       target,
@@ -548,7 +543,7 @@ async function controller(workflow) {
     runtime.launch.status = "started";
     runtime.launch.step = launchSteps.length;
     await delay(0);
-    project(runtime, "working");
+    project(runtime);
     await monitor(runtime, repository);
     let releaseError = null;
     try { await releaseParent(runtime); } catch (error) { releaseError = error; console.error(`parent release failed: ${error.message}`); }
