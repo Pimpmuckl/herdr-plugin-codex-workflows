@@ -3,8 +3,9 @@
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
 const net = require("node:net");
+const path = require("node:path");
 const test = require("node:test");
-const { openInputPopup } = require("./controller.js");
+const { openInputPopup, progressView, resolveRepository } = require("./controller.js");
 const {
   Lifecycle,
   buildCodexArgs,
@@ -18,20 +19,65 @@ const {
   validateReport,
 } = require("./workflow.js");
 
-test("parses local issue forms and rejects a cross-repository URL", () => {
+test("full links select their repository while shorthand stays current", () => {
   assert.deepEqual(parseTarget("issue", "#42", "owner/repo"), {
-    type: "issue", number: 42, input: "#42",
+    type: "issue", number: 42, input: "#42", repo: "owner/repo", repositorySource: "current",
   });
+  assert.deepEqual(parseTarget("issue", "github.com/other/repo/issues/42", "owner/repo"), {
+    type: "issue", number: 42, input: "github.com/other/repo/issues/42", repo: "owner/repo", repositorySource: "current",
+  });
+  assert.deepEqual(parseTarget("pr", "pull/7", "owner/repo"), {
+    type: "pr", number: 7, input: "pull/7", repo: "owner/repo", repositorySource: "current",
+  });
+  assert.equal(parseTarget("pr", "https://github.com/Other/Repo/pull/7/files", "owner/repo").repo, "other/repo");
   assert.deepEqual(parseTarget("issue", "fix the startup race", "owner/repo"), {
-    type: "description", input: "fix the startup race", description: "fix the startup race",
+    type: "description", input: "fix the startup race", description: "fix the startup race", repo: "owner/repo", repositorySource: "current",
   });
-  assert.throws(
-    () => parseTarget("issue", "https://github.com/other/repo/issues/42", "owner/repo"),
-    /belongs to other\/repo/,
-  );
+  assert.deepEqual(parseTarget("issue", "https://github.com/Other/Repo/issues/42?notification=1", "owner/repo"), {
+    type: "issue", number: 42, input: "https://github.com/Other/Repo/issues/42?notification=1",
+    url: "https://github.com/other/repo/issues/42", repo: "other/repo", repositorySource: "link",
+  });
+  assert.throws(() => parseTarget("issue", "pull/42", "owner/repo"), /expected a GitHub issue/);
   assert.throws(() => parseTarget("pr", "describe a PR", "owner/repo"), /URL or number/);
   assert.throws(() => parseTarget("issue", "#0", "owner/repo"), /positive safe integer/);
   assert.throws(() => parseTarget("issue", "https://github.com/owner/repo/issues/0", "owner/repo"), /positive safe integer/);
+});
+
+test("resolves repositories by full owner and name identity", () => {
+  const codeRoot = "C:\\Code", current = { root: "C:\\Code\\current", repo: "owner/current", repoName: "current" };
+  const matching = { root: "C:\\Code\\target", repo: "other/target", repoName: "target" };
+  assert.equal(resolveRepository({ repo: "other/target" }, current, {
+    codeRoot,
+    exists: (root) => root === path.join(codeRoot, "target"),
+    identify: () => matching,
+    clone: () => assert.fail("matching checkout must be reused"),
+  }), matching);
+
+  const clones = [], canonical = path.join(codeRoot, "other", "target");
+  assert.deepEqual(resolveRepository({ repo: "other/target" }, current, {
+    codeRoot,
+    exists: () => false,
+    clone: (repo, root) => clones.push([repo, root]),
+    identify: (root) => ({ root, repo: "other/target", repoName: "target" }),
+  }), { root: canonical, repo: "other/target", repoName: "target" });
+  assert.deepEqual(clones, [["other/target", canonical]]);
+
+  assert.throws(() => resolveRepository({ repo: "other/target" }, current, {
+    codeRoot,
+    exists: (root) => root === canonical,
+    identify: () => ({ root: canonical, repo: "another/target", repoName: "target" }),
+  }), /belongs to another\/target/);
+});
+
+test("renders repository provenance and launch checkpoints", () => {
+  const loading = progressView("pr", { status: "running", step: 0, repo: "owner/repo", repositorySource: "current" }, 0);
+  assert.match(loading, /owner\/repo \(current workspace\)/);
+  assert.match(loading, /\[\|\] Resolve repository/);
+  assert.match(loading, /0%/);
+  const started = progressView("issue", { status: "started", step: 4, repo: "other/repo", repositorySource: "link" });
+  assert.match(started, /other\/repo \(full link\)/);
+  assert.equal((started.match(/\[x\]/g) || []).length, 4);
+  assert.match(started, /100%/);
 });
 
 test("normalizes common GitHub origin forms", () => {

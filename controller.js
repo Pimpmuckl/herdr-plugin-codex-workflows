@@ -11,7 +11,7 @@ const {
 } = require("./cleanup.js");
 const {
   Lifecycle, WORKTREE_ROOT, buildCodexArgs, collisionReason, connectPipe, createPipeServer, makeIdentity,
-  makePipeName, parseGitHubRemote, parseTarget, parseWorktreeList,
+  makePipeName, parseGitHubRemote, parseSameRepositoryTarget, parseTarget, parseWorktreeList,
   sendPipeMessage, validateReport,
 } = require("./workflow.js");
 
@@ -20,6 +20,8 @@ const METADATA_SOURCE = "plugin:pimpmuckl.codex-workflows";
 const herdr = process.env.HERDR_BIN_PATH || "herdr", gitBin = process.env.GIT_BIN_PATH || "git";
 const gh = process.env.GH_BIN_PATH || "gh", codexBin = process.env.CODEX_BIN_PATH;
 const pluginRoot = process.env.HERDR_PLUGIN_ROOT || __dirname;
+const CODE_ROOT = path.dirname(WORKTREE_ROOT);
+const launchSteps = ["Resolve repository", "Verify GitHub target", "Create worktree", "Start Codex"];
 function readJson(value, fallback = null) {
   try {
     return JSON.parse(value);
@@ -85,12 +87,40 @@ function notify(title, body, sound = "request") {
   }
 }
 
-function sourceRepository(context) {
-  const cwd = context.worktree?.checkout_path || context.workspace_cwd || context.focused_pane_cwd;
-  if (!cwd) throw new Error("the action did not receive a workspace checkout");
-  const root = context.worktree?.repo_root || git(cwd, ["rev-parse", "--show-toplevel"]);
+function repositoryAt(root) {
+  root = git(root, ["rev-parse", "--show-toplevel"]);
   const repo = parseGitHubRemote(git(root, ["remote", "get-url", "origin"]));
   return { root: path.resolve(root), repo, repoName: repo.split("/").pop() };
+}
+
+function sourceRepository(context) {
+  const cwd = context.worktree?.repo_root || context.worktree?.checkout_path || context.workspace_cwd || context.focused_pane_cwd;
+  if (!cwd) throw new Error("the action did not receive a workspace checkout");
+  return repositoryAt(cwd);
+}
+
+function resolveRepository(target, current, operations = {}) {
+  if (target.repo === current.repo) return current;
+  const exists = operations.exists || fs.existsSync;
+  const identify = operations.identify || repositoryAt;
+  const codeRoot = operations.codeRoot || CODE_ROOT;
+  const clone = operations.clone || ((repo, root) => {
+    fs.mkdirSync(path.dirname(root), { recursive: true });
+    execute(gh, ["repo", "clone", repo, root]);
+  });
+  const [owner, name] = target.repo.split("/");
+  const familiar = path.join(codeRoot, name);
+  if (exists(familiar)) {
+    try {
+      const repository = identify(familiar);
+      if (repository.repo === target.repo) return repository;
+    } catch {}
+  }
+  const root = path.join(codeRoot, owner, name);
+  if (!exists(root)) clone(target.repo, root);
+  const repository = identify(root);
+  if (repository.repo !== target.repo) throw new Error(`repository path ${root} belongs to ${repository.repo}, not ${target.repo}`);
+  return repository;
 }
 
 function requireGitHubAuth() {
@@ -412,6 +442,22 @@ async function monitor(runtime) {
   }
 }
 
+function progressView(workflow, launch, frame = 0) {
+  const step = Math.max(0, Math.min(launchSteps.length, Number(launch.step) || 0));
+  const complete = launch.status === "started" ? launchSteps.length : step;
+  const width = 24, filled = Math.round((complete / launchSteps.length) * width);
+  const spinner = "|/-\\"[frame % 4];
+  const source = launch.repositorySource === "link" ? "full link" : "current workspace";
+  const rows = launchSteps.map((label, index) => {
+    const marker = index < complete ? "[x]" : launch.status === "running" && index === step ? `[${spinner}]` : "[ ]";
+    return `${marker} ${label}`;
+  });
+  return `\x1b[2J\x1b[H${workflow === "issue" ? "Issue to pull request" : "Understand pull request"}\n`
+    + `Repository: ${launch.repo} (${source})\n`
+    + `[${"#".repeat(filled)}${".".repeat(width - filled)}] ${Math.round((complete / launchSteps.length) * 100)}%\n`
+    + `${rows.join("\n")}\n`;
+}
+
 function openInputPopup(pipeName, workflow, repo, invoke = runHerdr) {
   const args = [
     "plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "input",
@@ -427,14 +473,17 @@ function openInputPopup(pipeName, workflow, repo, invoke = runHerdr) {
 async function controller(workflow) {
   if (process.platform !== "win32") throw new Error("Codex Workflows supports Windows only");
   const context = readJson(process.env.HERDR_PLUGIN_CONTEXT_JSON, {});
-  const repository = sourceRepository(context);
+  let repository = sourceRepository(context);
   const lifecycle = new Lifecycle();
   const pipeName = makePipeName();
   let resolveInput;
   let resolveHello;
   const inputPromise = new Promise((resolve) => { resolveInput = resolve; });
   const helloPromise = new Promise((resolve) => { resolveHello = resolve; });
-  const runtime = { workflow, lifecycle, pipeName, phase: "investigating", terminal: null };
+  const runtime = {
+    workflow, lifecycle, pipeName, phase: "investigating", terminal: null,
+    launch: { status: "collecting", step: 0, repo: repository.repo, repositorySource: "current" },
+  };
   const server = await createPipeServer(pipeName, {
     async message(message, connection) {
       if (message?.type === "hello") {
@@ -450,6 +499,7 @@ async function controller(workflow) {
         resolveInput(message.type === "input" ? compact(message.value) : null);
         return {};
       }
+      if (connection.popup && message?.type === "status") return { launch: { ...runtime.launch } };
       if (lifecycle.state !== "RUNNING") throw new Error("workflow parent is not running");
       if (workflow === "pr" && message?.type === "query-github") return { snapshot: githubSnapshot(repository, runtime.prNumber) };
       if (workflow === "pr" && message?.type === "query-review-page") {
@@ -464,7 +514,7 @@ async function controller(workflow) {
       } else {
         if (runtime.terminal) throw new Error("terminal report was already received");
         if (workflow === "issue" && report.status === "complete") {
-          const target = parseTarget("pr", report["pr-url"], repository.repo), live = readJson(execute(gh, ["pr", "view", String(target.number), "--repo", repository.repo, "--json", "state,headRefOid,baseRefName,headRefName"]));
+          const target = parseSameRepositoryTarget("pr", report["pr-url"], repository.repo), live = readJson(execute(gh, ["pr", "view", String(target.number), "--repo", repository.repo, "--json", "state,headRefOid,baseRefName,headRefName"]));
           if (!target.url || live?.state !== "OPEN" || live.headRefOid?.toLowerCase() !== report["head-sha"].toLowerCase() || live.baseRefName !== runtime.baseBranch || live.headRefName !== runtime.identity.branch || !succeeds(gitBin, ["-C", runtime.worktree.path, "merge-base", "--is-ancestor", runtime.baseSha, report["head-sha"]])) throw new Error("terminal pull request does not connect the pinned base to the workflow branch at the reported head");
         }
         if (workflow === "pr" && report.status === "complete" && report["reviewed-head"].toLowerCase() !== runtime.headSha.toLowerCase()) throw new Error("terminal reviewed head does not match the pinned pull-request head");
@@ -486,8 +536,14 @@ async function controller(workflow) {
     await Promise.race([helloPromise, delay(30000).then(() => { throw new Error("input popup did not connect to its controller"); })]);
     const raw = await inputPromise;
     if (raw === null) return;
+    runtime.launch.status = "running";
     const target = parseTarget(workflow, raw, repository.repo);
+    runtime.launch.repo = target.repo;
+    runtime.launch.repositorySource = target.repositorySource;
+    runtime.launch.step = 1;
+    await delay(0);
     requireGitHubAuth();
+    repository = resolveRepository(target, repository);
     let details;
     let identity;
     if (workflow === "issue") {
@@ -501,6 +557,8 @@ async function controller(workflow) {
     }
     runtime.identity = identity; runtime.baseBranch = details.baseBranch; runtime.baseSha = details.baseSha;
     runtime.bridgeName = `herdr_workflow_${identity.agentName.slice(3)}`;
+    runtime.launch.step = 2;
+    await delay(0);
     runtime.worktree = createWorktree(repository, identity, workflow === "issue" ? details.baseSha : details.headSha);
     project(runtime, "investigating");
     const promptData = {
@@ -511,8 +569,13 @@ async function controller(workflow) {
       bridgeName: runtime.bridgeName,
       ...details,
     };
+    runtime.launch.step = 3;
+    await delay(0);
     await startParent(runtime, workflow === "issue" ? issuePrompt(promptData) : prPrompt(promptData));
     lifecycle.transition("provisioned");
+    runtime.launch.status = "started";
+    runtime.launch.step = launchSteps.length;
+    await delay(0);
     project(runtime, "investigating");
     await monitor(runtime);
     let releaseError = null;
@@ -529,6 +592,9 @@ async function controller(workflow) {
       }
     }
   } catch (error) {
+    runtime.launch.status = "failed";
+    runtime.launch.error = error.message;
+    if (runtime.popupConnected) await delay(100);
     if (runtime.prompt) try { await stopParent(runtime); } catch (stopError) { console.error(`parent shutdown failed: ${stopError.message}`); }
     if (!["COMPLETE", "FAILED", "CANCELLED"].includes(lifecycle.state)) lifecycle.transition("fail");
     if (runtime.worktree) {
@@ -544,6 +610,24 @@ async function controller(workflow) {
   }
 }
 
+async function showLaunchProgress(client, workflow) {
+  let launch = { status: "running", step: 0, repo: process.env.HERDR_CODEX_WORKFLOW_REPO, repositorySource: "current" };
+  for (let frame = 0; ; frame += 1) {
+    let reply, failure, settled = false;
+    client.request({ type: "status" }).then((value) => { reply = value; settled = true; }, (error) => { failure = error; settled = true; });
+    while (!settled) {
+      output.write(progressView(workflow, launch, frame));
+      await delay(80);
+    }
+    if (failure) throw failure;
+    if (!reply.ok) throw new Error(reply.error);
+    launch = reply.launch;
+    output.write(progressView(workflow, launch, frame));
+    if (launch.status === "failed") throw new Error(launch.error || "workflow launch failed");
+    if (launch.status === "started") { await delay(200); return; }
+  }
+}
+
 async function popup() {
   const pipeName = process.env.HERDR_CODEX_WORKFLOW_PIPE;
   const workflow = process.env.HERDR_CODEX_WORKFLOW_KIND;
@@ -556,10 +640,13 @@ async function popup() {
     output.write("\x1b[2J\x1b[H");
     output.write(workflow === "issue" ? "Issue to pull request\n\n" : "Understand pull request\n\n");
     output.write(`Repository: ${process.env.HERDR_CODEX_WORKFLOW_REPO}\n`);
+    output.write("Full GitHub links select their repository.\n");
+    output.write("Numbers and partial links stay in this repository.\n\n");
     const value = await readPopupInput(workflow === "issue" ? "Issue URL, number, or short description: " : "Pull-request URL or number: ");
     reply = await client.request(value === null ? { type: "cancel" } : { type: "input", value });
     if (!reply.ok) throw new Error(reply.error);
     submitted = true;
+    if (value !== null) await showLaunchProgress(client, workflow);
   } finally {
     if (submitted) client.socket.end();
     else client.socket.destroy();
@@ -688,7 +775,7 @@ async function main() {
   throw new Error("expected issue, pr, popup, mcp, cleanup, or watch mode");
 }
 
-module.exports = { openInputPopup };
+module.exports = { openInputPopup, progressView, resolveRepository };
 
 if (require.main === module) {
   main().catch((error) => {

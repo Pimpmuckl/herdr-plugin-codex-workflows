@@ -34,23 +34,39 @@ function parseGitHubRemote(value) {
 function parseTarget(workflow, raw, currentRepo) {
   const input = compact(raw);
   if (!input) throw new Error("input is required");
-  const url = input.match(/^https?:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/(issues|pull)\/([0-9]+)\/?$/i);
-  if (url) {
-    const repo = normalizeRepo(url[1]);
-    if (repo !== normalizeRepo(currentRepo)) {
-      throw new Error(`reference belongs to ${repo}, not ${normalizeRepo(currentRepo)}`);
+  const current = normalizeRepo(currentRepo);
+  if (/^https?:\/\//i.test(input)) {
+    let url;
+    try { url = new URL(input); } catch { throw new Error("unsupported GitHub reference"); }
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (url.hostname.toLowerCase() !== "github.com" || parts.length < 4 || !["issues", "pull"].includes(parts[2].toLowerCase())) {
+      throw new Error("unsupported GitHub reference");
     }
-    if ((workflow === "issue" && url[2].toLowerCase() !== "issues")
-      || (workflow === "pr" && url[2].toLowerCase() !== "pull")) {
+    const kind = parts[2].toLowerCase();
+    if ((workflow === "issue" && kind !== "issues") || (workflow === "pr" && kind !== "pull")) {
       throw new Error(`expected a GitHub ${workflow === "issue" ? "issue" : "pull request"}`);
     }
-    return { type: workflow, number: targetNumber(url[3]), input, url: `https://github.com/${repo}/${url[2].toLowerCase()}/${url[3]}` };
+    const repo = normalizeRepo(`${parts[0]}/${parts[1]}`), number = targetNumber(parts[3]);
+    return { type: workflow, number, input, url: `https://github.com/${repo}/${kind}/${number}`, repo, repositorySource: "link" };
   }
-  if (/^https?:\/\//i.test(input)) throw new Error("unsupported GitHub reference");
+  const reference = input.match(/(?:^|\/)(issues|pull)\/([0-9]+)(?:\/.*)?$/i);
+  if (reference) {
+    const kind = reference[1].toLowerCase();
+    if ((workflow === "issue" && kind !== "issues") || (workflow === "pr" && kind !== "pull")) {
+      throw new Error(`expected a GitHub ${workflow === "issue" ? "issue" : "pull request"}`);
+    }
+    return { type: workflow, number: targetNumber(reference[2]), input, repo: current, repositorySource: "current" };
+  }
   const number = input.match(/^#?([0-9]+)$/);
-  if (number) return { type: workflow, number: targetNumber(number[1]), input };
+  if (number) return { type: workflow, number: targetNumber(number[1]), input, repo: current, repositorySource: "current" };
   if (workflow === "pr") throw new Error("enter a pull-request URL or number");
-  return { type: "description", input, description: input };
+  return { type: "description", input, description: input, repo: current, repositorySource: "current" };
+}
+
+function parseSameRepositoryTarget(workflow, raw, repo) {
+  const target = parseTarget(workflow, raw, repo), current = normalizeRepo(repo);
+  if (target.repo !== current) throw new Error(`reference belongs to ${target.repo}, not ${current}`);
+  return target;
 }
 
 function slug(value) {
@@ -248,4 +264,4 @@ async function sendPipeMessage(pipeName, message) {
 }
 
 module.exports = { Lifecycle, WORKTREE_ROOT, buildCodexArgs, collisionReason, connectPipe, createPipeServer, makeIdentity,
-  makePipeName, normalizePath, parseGitHubRemote, parseTarget, parseWorktreeList, sendPipeMessage, validateReport };
+  makePipeName, normalizePath, parseGitHubRemote, parseSameRepositoryTarget, parseTarget, parseWorktreeList, sendPipeMessage, validateReport };

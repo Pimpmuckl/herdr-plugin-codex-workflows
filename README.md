@@ -47,14 +47,20 @@ description = "clean up Codex workflow"
 
 Then run `herdr server reload-config`.
 
-`issue-to-pr` accepts a same-repository issue URL, an issue number, or a short
-description. It pins the fetched default-branch SHA, creates a unique worktree,
-and starts one Codex parent that owns implementation, review, CI, and an open
-pull request. It never merges.
+`issue-to-pr` accepts a complete issue URL, an issue number, a partial issue
+link, or a short description. A complete GitHub URL selects its repository;
+the other forms use the current repository. It pins the fetched default-branch
+SHA, creates a unique worktree, and starts one Codex parent that owns
+implementation, review, CI, and an open pull request. It never merges.
 
-`understand-pr` accepts a same-repository pull-request URL or number. It checks
-out the exact head SHA on a synthetic local branch and starts Codex with an
-enforced read-only sandbox. It never pushes or posts to GitHub.
+`understand-pr` accepts a complete pull-request URL, partial link, or number
+with the same repository-selection rule. It checks out the exact head SHA on a
+synthetic local branch and starts Codex with an enforced read-only sandbox. It
+never pushes or posts to GitHub.
+
+For a full link to another repository, the plugin reuses a matching
+`C:\Code\<repo>` checkout when present. Otherwise it clones to
+`C:\Code\<owner>\<repo>` before creating the isolated worktree.
 
 ## Lifecycle and cleanup
 
@@ -83,5 +89,5 @@ or startup recovery and does not reconstruct the wait after restart. Use the
 manual cleanup action after inspection when its safety checks still pass.
 
 Non-goals are persistent workflow state, dashboards, background services,
-automatic recovery, cross-repository references, automatic merge, force
-removal, and workflow-branch deletion.
+automatic recovery, automatic merge, force removal, and workflow-branch
+deletion.
