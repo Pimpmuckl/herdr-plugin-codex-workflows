@@ -112,7 +112,8 @@ function notify(title, body, sound = "request") {
 }
 
 function canonicalRepositoryRoot(checkoutRoot, commonDirectory) {
-  return path.dirname(path.resolve(checkoutRoot, commonDirectory));
+  const commonRoot = path.resolve(checkoutRoot, commonDirectory);
+  return path.basename(commonRoot) === ".git" ? path.dirname(commonRoot) : path.resolve(checkoutRoot);
 }
 
 function repositoryAt(root) {

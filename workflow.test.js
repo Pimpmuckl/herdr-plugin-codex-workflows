@@ -112,6 +112,9 @@ test("shorthand follows the focused pane repository", () => {
     "C:\\Code\\.worktrees\\plugin\\review-pr-1", "C:\\Code\\plugin\\.git",
   ), "C:\\Code\\plugin");
   assert.equal(canonicalRepositoryRoot("C:\\Code\\plugin", ".git"), "C:\\Code\\plugin");
+  assert.equal(canonicalRepositoryRoot(
+    "C:\\Code\\parent\\submodule", "C:\\Code\\parent\\.git\\modules\\submodule",
+  ), "C:\\Code\\parent\\submodule");
 });
 
 test("opens a slim unfocused progress split under the invoking pane", () => {
