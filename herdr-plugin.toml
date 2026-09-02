@@ -22,7 +22,7 @@ id = "input"
 title = "Codex Workflow"
 placement = "popup"
 width = "70%"
-height = 4
+height = 5
 command = ["node", "controller.js", "popup"]
 
 [[panes]]

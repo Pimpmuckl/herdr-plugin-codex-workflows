@@ -106,11 +106,17 @@ test("opens popup on Herdr's active pane without rejected target flags", () => {
 test("popup keeps custom instructions separate from the GitHub target", () => {
   const state = { active: 0, values: ["", ""] };
   popupInputKey(state, "#42", {});
+  assert.match(popupInputView(state, 40), /\x1b\[1;\d+H$/);
   popupInputKey(state, "", { name: "down" });
   popupInputKey(state, "focus startup", {});
   assert.deepEqual(state, { active: 1, values: ["#42", "focus startup"] });
-  assert.match(popupInputView(state), /> Custom instructions: focus startup/);
+  assert.match(popupInputView(state, 40), /─+\n> Custom instructions: focus startup\x1b\[3;\d+H$/);
   assert.equal(popupInputKey(state, "", { name: "return" }), "submit");
+
+  state.values[1] = "x".repeat(100);
+  const long = popupInputView(state, 40).replace(/^\x1b\[2J\x1b\[H/, "").replace(/\x1b\[3;\d+H$/, "");
+  assert.equal(long.split("\n").length, 3);
+  assert.ok(long.split("\n").every((line) => [...line].length < 40));
 
   const input = { repo: "owner/repo", target: { input: "#42" }, instructions: "focus startup" };
   assert.match(issuePrompt(input), /Additional user instructions \(task context\): "focus startup"/);

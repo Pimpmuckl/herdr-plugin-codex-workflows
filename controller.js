@@ -740,9 +740,15 @@ async function progress() {
   finally { client.socket.end(); }
 }
 
-function popupInputView(state) {
-  return `\x1b[2J\x1b[H${state.active === 0 ? ">" : " "} Paste issue or PR: ${state.values[0]}\n`
-    + `${state.active === 1 ? ">" : " "} Custom instructions: ${state.values[1]}`;
+function popupInputView(state, width = output.columns || 80) {
+  const field = (index, label) => {
+    const prefix = `${state.active === index ? ">" : " "} ${label}: `;
+    const room = Math.max(1, width - prefix.length - 1);
+    return prefix + [...state.values[index]].slice(-room).join("");
+  };
+  const rows = [field(0, "Paste issue or PR"), "─".repeat(Math.max(1, width - 1)), field(1, "Custom instructions")];
+  const cursorRow = state.active === 0 ? 1 : 3;
+  return `\x1b[2J\x1b[H${rows.join("\n")}\x1b[${cursorRow};${[...rows[cursorRow - 1]].length + 1}H`;
 }
 
 function popupInputKey(state, sequence, key) {
@@ -752,7 +758,7 @@ function popupInputKey(state, sequence, key) {
   else if (["right", "down"].includes(key.name)) state.active = 1;
   else if (["left", "up"].includes(key.name)) state.active = 0;
   else if (key.name === "backspace") state.values[state.active] = [...state.values[state.active]].slice(0, -1).join("");
-  else if (sequence && !key.ctrl && !key.meta && !sequence.startsWith("\x1b")) state.values[state.active] += sequence;
+  else if (sequence && !key.ctrl && !key.meta && !sequence.startsWith("\x1b")) state.values[state.active] += sequence.replace(/[\r\n\t]+/g, " ");
   else return null;
   return "render";
 }
