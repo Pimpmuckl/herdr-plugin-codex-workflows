@@ -757,7 +757,7 @@ function popupInputView(state, width = output.columns || 80, height = output.row
 
 function popupInputKey(state, sequence, key) {
   sequence ??= key.sequence;
-  if (key.name === "escape" || (key.ctrl && key.name === "c")) return "cancel";
+  if (key.name === "escape" || (key.ctrl && key.name === "c") || ["\x1b[27u", "\x1b[99;5u"].includes(sequence)) return "cancel";
   if (["return", "enter"].includes(key.name) || sequence === "\x1b[13;2u") {
     if (state.active === 1 && (key.shift || sequence === "\x1b[13;2u")) { state.values[1] += "\n"; return "render"; }
     return state.values[0].trim() ? "submit" : null;
