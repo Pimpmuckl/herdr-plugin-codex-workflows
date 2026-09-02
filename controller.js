@@ -59,11 +59,15 @@ function runHerdrJson(args) {
   return runJson(herdr, args);
 }
 
-function runCodex(args) {
-  return codexBin ? execute(codexBin, args) : execute(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "codex", ...args]);
+function runCanonicalCodex(args) {
+  return execute(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "codex", ...args]);
 }
 
-function codexAgentStartArgs(agentName, paneId, readHelp = () => runCodex(["--help"])) {
+function runCodex(args) {
+  return codexBin ? execute(codexBin, args) : runCanonicalCodex(args);
+}
+
+function codexAgentStartArgs(agentName, paneId, readHelp = () => runCanonicalCodex(["--help"])) {
   const args = ["agent", "start", agentName, "--kind", "codex", "--pane", paneId];
   try {
     if (/(?:^|\s)--auto-account(?=\s|$)/m.test(readHelp())) args.push("--", "--auto-account");
