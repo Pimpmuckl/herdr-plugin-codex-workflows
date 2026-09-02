@@ -4,14 +4,20 @@ function customInstructions(input) {
   return input.instructions ? `\nImportant! Custom Instructions:\n${input.instructions}\n` : "";
 }
 
+function reviewInstruction(input) {
+  return input.repo.toLowerCase() === "herdrdev/herdr"
+    ? "$review-suite:review mode fast"
+    : "$review-suite:review with the mode selected by its skill instructions";
+}
+
 function issuePrompt(input) {
   return `You are investigating issue ${input.target.url} on repository ${input.repo}.
 
 1. Read and follow the applicable AGENTS.md. Investigate and reproduce the issue before editing. Use $ask-pro:ask-pro only if the problem is genuinely difficult.
 2. Prepare the smallest complete fix and run $review-suite:review-plan before implementation.
 3. Dispatch one implementation subagent to implement and validate the fix. Review its work and keep it minimal.
-4. Run $ponytail:ponytail-review once, then $review-suite:review mode fast until green.
-5. Push the branch and open a pull request. Do not merge it. Handle CI, CodeRabbit, and Greptile; verify findings and reply to every addressed inline bot comment.
+4. Run $ponytail:ponytail-review once, then ${reviewInstruction(input)} until green.
+5. Push the branch and open a pull request. Do not merge it. Handle CI and any automated reviewers present; verify findings and reply to every addressed inline comment.
 6. Leave a concise recap with the root cause, fix, validation, review state, and pull-request URL.
 ${customInstructions(input)}`;
 }
@@ -22,7 +28,7 @@ function prPrompt(input) {
 1. Read and follow the applicable AGENTS.md. Stay strictly read-only: do not edit, commit, push, comment, review, or merge.
 2. Inspect the complete pull request, checks, reviews, and comments. Explain what it does, why, and the relevant architecture.
 3. Judge whether it is the smallest correct change. Use $ponytail:ponytail-review and $ask-pro:ask-pro when the judgment is difficult.
-4. For a tricky pull request, run $review-suite:review mode fast.
+4. For a tricky pull request, run ${reviewInstruction(input)}.
 5. Leave a concise recap with risks, verified findings, and actionable review recommendations.
 ${customInstructions(input)}`;
 }
