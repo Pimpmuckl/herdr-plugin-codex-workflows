@@ -126,8 +126,8 @@ test("popup edits and renders multiline custom instructions", () => {
   assert.match(issuePrompt(promptInput), /Important! Custom Instructions:\nfocus startup\nthen test/);
   assert.match(prPrompt(promptInput), /Important! Custom Instructions:\nfocus startup\nthen test/);
   assert.doesNotMatch(issuePrompt({ ...promptInput, instructions: "" }), /Custom Instructions/);
-  assert.match(issuePrompt(promptInput), /mode selected by its skill instructions/);
-  assert.match(prPrompt({ ...promptInput, repo: "herdrdev/herdr" }), /review mode fast/);
+  assert.match(issuePrompt(promptInput), /\$review-suite:review \(note: herdrdev\/herdr uses mode fast\)/);
+  assert.match(prPrompt(promptInput), /\$review-suite:review \(note: herdrdev\/herdr uses mode fast\)/);
 });
 
 test("shorthand follows the focused pane repository", () => {
