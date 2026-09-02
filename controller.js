@@ -563,7 +563,7 @@ async function controller() {
   const helloPromise = new Promise((resolve) => { resolveHello = resolve; });
   const progressPromise = new Promise((resolve) => { resolveProgress = resolve; });
   const runtime = {
-    workflow: null, lifecycle, pipeName, terminal: null,
+    workflow: null, lifecycle, terminal: null,
     launch: { status: "collecting", step: 0, repo: repository.repo, repositorySource: "current" },
   };
   const server = await createPipeServer(pipeName, controllerProtocol(runtime, lifecycle, resolveHello, resolveInput, resolveProgress));
