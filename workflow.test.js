@@ -109,7 +109,7 @@ test("popup edits and renders multiline custom instructions", () => {
   assert.match(popupInputView(state, 40), /\x1b\[1;\d+H$/);
   popupInputKey(state, "", { name: "down" });
   popupInputKey(state, "focus startup", {});
-  assert.equal(popupInputKey(state, "\x1b[13;2u", { name: "undefined" }), "render");
+  assert.equal(popupInputKey(state, undefined, { name: "undefined", sequence: "\x1b[13;2u" }), "render");
   popupInputKey(state, "then test", {});
   assert.deepEqual(state, { active: 1, values: ["#42", "focus startup\nthen test"] });
   assert.match(popupInputView(state, 40, 6), /─+\n> Custom instructions:\n  focus startup\n  then test\x1b\[5;\d+H$/);
