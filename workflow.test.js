@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const net = require("node:net");
 const path = require("node:path");
 const test = require("node:test");
-const { openInputPopup, progressView, resolveRepository } = require("./controller.js");
+const { codexAgentStartArgs, openInputPopup, progressView, resolveRepository } = require("./controller.js");
 const {
   Lifecycle,
   collisionReason,
@@ -89,6 +89,16 @@ test("opens popup on Herdr's active pane without rejected target flags", () => {
   assert.equal(args.includes("--target-pane"), false);
   assert.equal(args[args.indexOf("--cwd") + 1], __dirname);
   assert.equal(args.at(-1), "--focus");
+});
+
+test("forwards Codex++ auto-account only when the executable advertises it", () => {
+  const base = ["agent", "start", "worker", "--kind", "codex", "--pane", "w1:p2"];
+  assert.deepEqual(codexAgentStartArgs("worker", "w1:p2", () => "  --auto-account  Immediately select an account"), [
+    ...base, "--", "--auto-account",
+  ]);
+  assert.deepEqual(codexAgentStartArgs("worker", "w1:p2", () => "  --version  Print version"), base);
+  assert.deepEqual(codexAgentStartArgs("worker", "w1:p2", () => "  --auto-accounting  Not the capability"), base);
+  assert.deepEqual(codexAgentStartArgs("worker", "w1:p2", () => { throw new Error("probe failed"); }), base);
 });
 
 test("refuses local, path, Git worktree, and Herdr collisions", () => {
