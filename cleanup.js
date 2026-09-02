@@ -3,7 +3,7 @@
 const path = require("node:path");
 const crypto = require("node:crypto"), net = require("node:net");
 const { spawn } = require("node:child_process");
-const { WORKTREE_ROOT, normalizePath, parseGitHubRemote, parseSameRepositoryTarget, parseWorktreeList } = require("./workflow.js");
+const { WORKTREE_ROOT, normalizePath, parseGitHubRemote, parseSameRepositoryPullRequest, parseWorktreeList } = require("./workflow.js");
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TERMINAL_STATES = new Set(["complete", "failed", "cancelled"]);
@@ -38,7 +38,7 @@ function associatedPr(workflow, report, originalNumber, repo) {
     if (!Number.isSafeInteger(originalNumber) || originalNumber < 1) throw new Error("pull-request number is missing");
     return originalNumber;
   }
-  return parseSameRepositoryTarget("pr", report?.["pr-url"], repo).number;
+  return parseSameRepositoryPullRequest(report?.["pr-url"], repo).number;
 }
 
 function matchingSession(agents, workspaceId, rootPaneId) {

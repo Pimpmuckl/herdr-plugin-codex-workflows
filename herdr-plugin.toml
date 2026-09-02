@@ -2,20 +2,14 @@ id = "pimpmuckl.codex-workflows"
 name = "Codex Workflows"
 version = "0.1.0"
 min_herdr_version = "0.8.2"
-description = "Turn issues into reviewed pull requests and understand pull requests in isolated Codex workspaces."
+description = "Start issue fixes and pull-request reviews in isolated Codex workspaces."
 platforms = ["windows"]
 
 [[actions]]
 id = "issue-to-pr"
-title = "Issue to pull request"
+title = "Issue or pull request"
 contexts = ["workspace", "tab", "pane"]
-command = ["node", "controller.js", "issue"]
-
-[[actions]]
-id = "understand-pr"
-title = "Understand pull request"
-contexts = ["workspace", "tab", "pane"]
-command = ["node", "controller.js", "pr"]
+command = ["node", "controller.js", "start"]
 
 [[actions]]
 id = "cleanup-current-workflow"
@@ -27,6 +21,12 @@ command = ["node", "controller.js", "cleanup"]
 id = "input"
 title = "Codex Workflow"
 placement = "popup"
-width = "80%"
-height = 10
+width = "70%"
+height = 4
 command = ["node", "controller.js", "popup"]
+
+[[panes]]
+id = "progress"
+title = "Starting Codex"
+placement = "split"
+command = ["node", "controller.js", "progress"]
