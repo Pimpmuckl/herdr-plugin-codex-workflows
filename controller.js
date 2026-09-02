@@ -501,7 +501,7 @@ function openProgressPane(pipeName, context, open = runHerdrJson, resize = runHe
   resize(["pane", "resize", "--pane", context.focused_pane_id, "--direction", "down", "--amount", "0.4"]);
 }
 
-function controllerProtocol(runtime, lifecycle, resolveHello, resolveInput) {
+function controllerProtocol(runtime, lifecycle, resolveHello, resolveInput, resolveProgress = () => {}) {
   return {
     async message(message, connection) {
       if (message?.type === "hello" && message.role === "input") {
@@ -513,6 +513,7 @@ function controllerProtocol(runtime, lifecycle, resolveHello, resolveInput) {
       }
       if (message?.type === "hello" && message.role === "progress") {
         connection.role = "progress";
+        resolveProgress();
         return {};
       }
       if (connection.role === "input" && ["input", "cancel"].includes(message?.type)) {
@@ -541,13 +542,15 @@ async function controller() {
   const pipeName = makePipeName();
   let resolveInput;
   let resolveHello;
+  let resolveProgress;
   const inputPromise = new Promise((resolve) => { resolveInput = resolve; });
   const helloPromise = new Promise((resolve) => { resolveHello = resolve; });
+  const progressPromise = new Promise((resolve) => { resolveProgress = resolve; });
   const runtime = {
     workflow: null, lifecycle, pipeName, terminal: null,
     launch: { status: "collecting", step: 0, repo: repository.repo, repositorySource: "current" },
   };
-  const server = await createPipeServer(pipeName, controllerProtocol(runtime, lifecycle, resolveHello, resolveInput));
+  const server = await createPipeServer(pipeName, controllerProtocol(runtime, lifecycle, resolveHello, resolveInput, resolveProgress));
 
   try {
     openInputPopup(pipeName);
@@ -559,6 +562,8 @@ async function controller() {
     runtime.launch.repo = target.repo;
     runtime.launch.repositorySource = target.repositorySource;
     openProgressPane(pipeName, context);
+    await Promise.race([progressPromise, delay(30000).then(() => { throw new Error("progress pane did not connect to its controller"); })]);
+    await delay(0);
     requireGitHubAuth();
     repository = resolveRepository(target, repository);
     runtime.launch.step = 1;

@@ -129,14 +129,15 @@ test("opens a slim unfocused progress split under the invoking pane", () => {
 
 test("progress can observe launch status after input submits", async () => {
   const lifecycle = new Lifecycle(), runtime = { launch: { status: "collecting", step: 0 } };
-  let submitted, hello = false;
-  const protocol = controllerProtocol(runtime, lifecycle, () => { hello = true; }, (value) => { submitted = value; });
+  let submitted, hello = false, progressHello = false;
+  const protocol = controllerProtocol(runtime, lifecycle, () => { hello = true; }, (value) => { submitted = value; }, () => { progressHello = true; });
   const inputConnection = {}, progressConnection = {};
   await protocol.message({ type: "hello", role: "input" }, inputConnection);
   await protocol.message({ type: "input", value: "#42" }, inputConnection);
   runtime.launch.status = "running";
   await protocol.message({ type: "hello", role: "progress" }, progressConnection);
   assert.equal(hello, true);
+  assert.equal(progressHello, true);
   assert.equal(submitted, "#42");
   assert.equal((await protocol.message({ type: "status" }, progressConnection)).launch.status, "running");
 });
