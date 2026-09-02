@@ -604,9 +604,10 @@ async function controller() {
     await monitor(runtime, repository);
     let releaseError = null;
     try { await releaseParent(runtime); } catch (error) { releaseError = error; console.error(`parent release failed: ${error.message}`); }
-    if (runtime.terminal?.status === "complete" && runtime.workflow === "issue") {
+    if (runtime.terminal?.status === "complete" && releaseError) {
+      notify("Codex workflow release failed", "The workspace and Codex agent remain available for inspection.");
+    } else if (runtime.terminal?.status === "complete" && runtime.workflow === "issue") {
       try {
-        if (releaseError) throw releaseError;
         await handoffCleanup(runtime, repository);
       }
       catch (error) {
