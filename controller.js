@@ -236,8 +236,9 @@ function createWorktree(repository, identity, baseSha) {
   return { ...result, path: worktree };
 }
 
-function project(runtime, blocked = false, reason = "") {
-  const phase = "working", text = blocked ? "working · blocked" : phase;
+function project(runtime, state = "working", reason = "") {
+  const phase = state === "waiting" ? "waiting" : "working";
+  const text = state === "blocked" ? "working · blocked" : phase;
   const workspaceId = runtime.worktree.workspace.workspace_id;
   const paneId = runtime.worktree.root_pane.pane_id;
   try {
@@ -383,6 +384,15 @@ function getAgent(name) {
   }
 }
 
+function waitForActivity(name, wait = runHerdrJson) {
+  try {
+    return wait(["agent", "wait", name, "--until", "working", "--until", "blocked", "--timeout", "1000"])?.result?.agent || null;
+  } catch (error) {
+    if (["timeout", "agent_not_running"].includes(error.herdrCode)) return null;
+    throw error;
+  }
+}
+
 function listAgents() {
   return runHerdrJson(["agent", "list"])?.result?.agents || [];
 }
@@ -441,12 +451,12 @@ async function releaseParent(runtime) {
   await waitForShell(paneId, outsideCwd);
 }
 
-function issuePullRequest(runtime, repository) {
-  const matches = readJson(execute(gh, [
+function issuePullRequest(runtime, repository, matches = readJson(execute(gh, [
     "pr", "list", "--repo", repository.repo, "--head", runtime.identity.branch, "--state", "open",
     "--json", "number,url,headRefOid,baseRefName,headRefName",
-  ]), []);
-  if (matches.length !== 1) throw new Error("Codex did not leave exactly one open pull request for the workflow branch");
+  ]), [])) {
+  if (matches.length === 0) return null;
+  if (matches.length !== 1) throw new Error("Codex left multiple open pull requests for the workflow branch");
   const pullRequest = matches[0];
   if (!pullRequest.headRefOid || pullRequest.baseRefName !== runtime.baseBranch || pullRequest.headRefName !== runtime.identity.branch
     || !succeeds(gitBin, ["-C", runtime.worktree.path, "merge-base", "--is-ancestor", runtime.baseSha, pullRequest.headRefOid])) {
@@ -455,39 +465,64 @@ function issuePullRequest(runtime, repository) {
   return pullRequest;
 }
 
-async function monitor(runtime, repository) {
-  let lastProjection = "";
+async function monitor(runtime, repository, operations = {}) {
+  const workspace = operations.workspace || getWorkspace;
+  const agentByName = operations.agent || getAgent;
+  const findIssuePullRequest = operations.issuePullRequest || issuePullRequest;
+  const currentHead = operations.currentPullRequestHead || currentPullRequestHead;
+  const updateProject = operations.project || project;
+  const updateTerminal = operations.projectTerminal || projectTerminal;
+  const activity = operations.activity || waitForActivity;
+  const wait = operations.delay || delay;
+  let lastProjection = "working", wasSettled = false;
   while (true) {
-    if (!getWorkspace(runtime.worktree.workspace.workspace_id)) {
+    if (!workspace(runtime.worktree.workspace.workspace_id)) {
       runtime.terminal = { type: "terminal", status: "cancelled", reason: "workflow workspace was closed" };
     }
-    const agent = getAgent(runtime.identity.agentName);
+    const agent = agentByName(runtime.identity.agentName);
     if (runtime.terminal) {
       runtime.lifecycle.transition("cancel");
-      projectTerminal(runtime, runtime.terminal, agent);
+      updateTerminal(runtime, runtime.terminal, agent);
       return;
     } else if (runtime.prompt?.error) {
       throw runtime.prompt.error;
     } else if (!agent) {
       throw new Error("Codex parent exited before the workflow completed");
     } else if (runtime.prompt?.finished && ["idle", "done"].includes(agent.agent_status)) {
+      if (wasSettled) {
+        const resumed = await activity(runtime.identity.agentName);
+        if (resumed) {
+          wasSettled = false;
+          const projection = resumed.agent_status === "blocked" ? "blocked" : "working";
+          if (projection !== lastProjection) updateProject(runtime, projection, "Codex needs input");
+          lastProjection = projection;
+        }
+        continue;
+      }
+      wasSettled = true;
       if (runtime.workflow === "issue") {
-        const pullRequest = issuePullRequest(runtime, repository);
+        const pullRequest = findIssuePullRequest(runtime, repository);
+        if (!pullRequest) {
+          updateProject(runtime, "waiting");
+          lastProjection = "waiting";
+          continue;
+        }
         runtime.prNumber = Number(pullRequest.number);
         runtime.terminal = { type: "terminal", status: "complete", "pr-url": pullRequest.url, "head-sha": pullRequest.headRefOid };
       } else {
         runtime.terminal = { type: "terminal", status: "complete", "reviewed-head": runtime.headSha,
-          "current-head": currentPullRequestHead(repository, runtime.prNumber) };
+          "current-head": currentHead(repository, runtime.prNumber) };
       }
       runtime.lifecycle.transition("complete");
-      projectTerminal(runtime, runtime.terminal, agent);
+      updateTerminal(runtime, runtime.terminal, agent);
       return;
     } else {
-      const key = agent.agent_status;
-      if (key !== lastProjection && agent.agent_status === "blocked") project(runtime, true, "Codex needs input");
-      lastProjection = key;
+      wasSettled = false;
+      const projection = agent.agent_status === "blocked" ? "blocked" : "working";
+      if (projection !== lastProjection) updateProject(runtime, projection, "Codex needs input");
+      lastProjection = projection;
     }
-    await delay(1000);
+    await wait(1000);
   }
 }
 
@@ -628,7 +663,7 @@ async function controller() {
       try { projectCleanup(runtime.worktree.workspace.workspace_id, "stopped"); }
       catch (error) { console.error(`cleanup metadata update failed: ${error.message}`); }
       notify("Codex workflow release failed", "The workspace remains. Close any active Codex agent before cleanup.");
-    } else if (runtime.terminal?.status === "complete" && runtime.workflow === "issue") {
+    } else if (runtime.terminal?.status === "complete") {
       try {
         await handoffCleanup(runtime, repository);
       }
@@ -637,9 +672,6 @@ async function controller() {
         notify("Codex workflow cleanup stopped", "Automatic cleanup could not be armed; the workspace and branch remain.");
         console.error(`cleanup handoff failed: ${error.message}`);
       }
-    } else if (runtime.terminal?.status === "complete") {
-      try { projectCleanup(runtime.worktree.workspace.workspace_id, "retained"); }
-      catch (error) { console.error(`cleanup metadata update failed: ${error.message}`); }
     }
   } catch (error) {
     runtime.launch.status = "failed";
@@ -792,7 +824,8 @@ async function main() {
 }
 
 module.exports = { canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup, openProgressPane,
-  isAgentPromptStalled, progressView, resolveRepository, sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands };
+  isAgentPromptStalled, issuePullRequest, monitor, progressView, resolveRepository, sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands,
+  waitForActivity };
 
 if (require.main === module) {
   main().catch((error) => {

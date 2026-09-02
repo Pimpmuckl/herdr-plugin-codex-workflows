@@ -6,8 +6,8 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup,
-  isAgentPromptStalled, openProgressPane, progressView, resolveRepository,
-  sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands,
+  isAgentPromptStalled, issuePullRequest, monitor, openProgressPane, progressView, resolveRepository,
+  sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands, waitForActivity,
 } = require("./controller.js");
 const {
   Lifecycle,
@@ -167,6 +167,53 @@ test("stalled prompts submit the pasted composer without repeating the prompt", 
   assert.equal(stalledPromptRecovery("blocked"), "started");
   assert.equal(stalledPromptRecovery(), "failed");
   assert.equal(stalledPromptRecovery("unknown"), "failed");
+});
+
+test("issue completion waits for a PR and rechecks after follow-up activity", async () => {
+  const lifecycle = new Lifecycle();
+  lifecycle.transition("submit");
+  lifecycle.transition("provisioned");
+  const runtime = {
+    workflow: "issue", lifecycle, terminal: null, prompt: { finished: true },
+    identity: { agentName: "worker" }, worktree: { workspace: { workspace_id: "w1" } },
+  };
+  let checks = 0, resume, reachedWaiting;
+  const waiting = new Promise((resolve) => { reachedWaiting = resolve; });
+  const paused = new Promise((resolve) => { resume = resolve; });
+  const projections = [];
+  let completed = false;
+  const monitoring = monitor(runtime, {}, {
+    workspace: () => ({}), agent: () => ({ agent_status: "idle" }),
+    issuePullRequest: () => ++checks === 1 ? null : ({ number: 12, url: "https://github.com/owner/repo/pull/12", headRefOid: "head" }),
+    project: (_runtime, state) => projections.push(state), projectTerminal: () => {},
+    activity: async () => {
+      reachedWaiting();
+      await paused;
+      return { agent_status: "working" };
+    },
+  }).then(() => { completed = true; });
+  await waiting;
+  assert.equal(completed, false);
+  assert.equal(runtime.terminal, null);
+  assert.equal(runtime.lifecycle.state, "RUNNING");
+  resume();
+  await monitoring;
+  assert.equal(checks, 2);
+  assert.deepEqual(projections, ["waiting", "working"]);
+  assert.equal(runtime.terminal["pr-url"], "https://github.com/owner/repo/pull/12");
+});
+
+test("issue PR lookup distinguishes zero, multiple, and invalid matches", () => {
+  const runtime = { identity: { branch: "codex/issue-1-a" }, baseBranch: "master", baseSha: "base", worktree: { path: "." } };
+  const repository = { repo: "owner/repo" };
+  assert.equal(issuePullRequest(runtime, repository, []), null);
+  assert.throws(() => issuePullRequest(runtime, repository, [{}, {}]), /multiple open pull requests/);
+  assert.throws(() => issuePullRequest(runtime, repository, [{}]), /does not connect the pinned base/);
+});
+
+test("activity wait returns control when its agent disappears", () => {
+  assert.equal(waitForActivity("worker", () => { const error = new Error(); error.herdrCode = "agent_not_running"; throw error; }), null);
+  assert.throws(() => waitForActivity("worker", () => { throw new Error("offline"); }), /offline/);
 });
 
 test("refuses local, path, Git worktree, and Herdr collisions", () => {
