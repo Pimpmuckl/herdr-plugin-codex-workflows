@@ -17,7 +17,7 @@ function safeReason(error, fallback) {
 function validatePayload(value) {
   if (!value || value.version !== 1 || !["issue", "pr"].includes(value.workflow)
     || !value.workspaceId || !value.rootPaneId || !value.worktreePath || !value.repoRoot
-    || !/^[^/\s]+\/[^/\s]+$/.test(value.repo) || !/^codex\/(?:issue|task|review-pr)-/.test(value.branch) || !UUID.test(value.sessionId)
+    || !/^[^/\s]+\/[^/\s]+$/.test(value.repo) || !/^codex\/(?:issue|review-pr)-/.test(value.branch) || !UUID.test(value.sessionId)
     || (value.prNumber !== null && (!Number.isSafeInteger(value.prNumber) || value.prNumber < 1))) {
     throw new Error("invalid cleanup watcher payload");
   }
