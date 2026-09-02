@@ -6,8 +6,8 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup,
-  openProgressPane, progressView, resolveRepository, shouldHandoffCleanup,
-  shouldRetryStalledPrompt, sourceDirectory, stalledPromptRetryArgs,
+  openProgressPane, progressView, resolveRepository, shouldRetryStalledPrompt,
+  sourceDirectory, stalledPromptRetryArgs,
 } = require("./controller.js");
 const {
   Lifecycle,
@@ -108,11 +108,6 @@ test("shorthand follows the focused pane repository", () => {
     worktree: { repo_root: "C:\\Users\\jonat\\.codex" },
     workspace_cwd: "C:\\Users\\jonat\\.codex",
   }), "C:\\Code\\plugin");
-});
-
-test("only issue fixes hand off automatic cleanup", () => {
-  assert.equal(shouldHandoffCleanup("issue"), true);
-  assert.equal(shouldHandoffCleanup("pr"), false);
 });
 
 test("opens a slim unfocused progress split under the invoking pane", () => {

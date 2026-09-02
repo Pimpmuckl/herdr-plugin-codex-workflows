@@ -121,10 +121,6 @@ function sourceRepository(context) {
   return repositoryAt(cwd);
 }
 
-function shouldHandoffCleanup(workflow) {
-  return workflow === "issue";
-}
-
 function resolveRepository(target, current, operations = {}) {
   if (target.repo === current.repo) return current;
   const exists = operations.exists || fs.existsSync;
@@ -608,7 +604,7 @@ async function controller() {
     await monitor(runtime, repository);
     let releaseError = null;
     try { await releaseParent(runtime); } catch (error) { releaseError = error; console.error(`parent release failed: ${error.message}`); }
-    if (runtime.terminal?.status === "complete" && shouldHandoffCleanup(runtime.workflow)) {
+    if (runtime.terminal?.status === "complete" && runtime.workflow === "issue") {
       try {
         if (releaseError) throw releaseError;
         await handoffCleanup(runtime, repository);
@@ -773,7 +769,7 @@ async function main() {
 }
 
 module.exports = { codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup, openProgressPane,
-  progressView, resolveRepository, shouldHandoffCleanup, shouldRetryStalledPrompt, sourceDirectory, stalledPromptRetryArgs };
+  progressView, resolveRepository, shouldRetryStalledPrompt, sourceDirectory, stalledPromptRetryArgs };
 
 if (require.main === module) {
   main().catch((error) => {
