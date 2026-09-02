@@ -122,9 +122,10 @@ test("popup edits and renders multiline custom instructions", () => {
   assert.equal(long.split("\n").length, 6);
   assert.ok(long.split("\n").every((line) => [...line].length < 40));
 
-  const promptInput = { repo: "owner/repo", target: { input: "#42" }, instructions: "focus startup\nthen test" };
-  assert.match(issuePrompt(promptInput), /Additional user instructions \(task context\): "focus startup\\nthen test"/);
-  assert.match(prPrompt(promptInput), /Additional user instructions \(task context\): "focus startup\\nthen test"/);
+  const promptInput = { repo: "owner/repo", target: { url: "https://github.com/owner/repo/issues/42" }, prUrl: "https://github.com/owner/repo/pull/42", instructions: "focus startup\nthen test" };
+  assert.match(issuePrompt(promptInput), /Important! Custom Instructions:\nfocus startup\nthen test/);
+  assert.match(prPrompt(promptInput), /Important! Custom Instructions:\nfocus startup\nthen test/);
+  assert.doesNotMatch(issuePrompt({ ...promptInput, instructions: "" }), /Custom Instructions/);
 });
 
 test("shorthand follows the focused pane repository", () => {
