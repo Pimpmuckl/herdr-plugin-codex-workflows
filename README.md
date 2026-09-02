@@ -61,16 +61,20 @@ lifecycle. When the canonical `codex` command advertises `--auto-account`, the
 controller forwards that startup option through Herdr; otherwise the launch is
 unchanged.
 
-After a successful workflow, the controller exits the owning Codex process and
-releases its Herdr command slot. Pull-request review workspaces stay available
-for inspection until you remove them with Herdr or the manual cleanup action.
+An issue workflow with no pull request remains active. When Codex becomes idle
+or done, its workspace is marked waiting. A blocked Codex stays marked blocked
+for human input. In each case, Codex, the controller, worktree, and workspace
+stay available for follow-up. The controller checks again after follow-up
+activity settles. Once an issue workflow has exactly one valid pull request,
+or a pull-request review completes, the controller exits the owning Codex
+process, releases its Herdr command slot, and starts the detached cleanup
+watcher for that pull request.
 
-For issue fixes, a detached watcher waits for the created pull request. An open
-pull request keeps the workspace intact. A closed, unmerged pull request also
-keeps it and stops the watcher. When GitHub reports an unambiguous merge, cleanup
-archives the exact owning Codex session, then rechecks the local identity and
-cleanliness and asks Herdr to remove the workspace and worktree without force.
-The workflow branch remains.
+An open pull request keeps the workspace intact. A closed, unmerged pull
+request also keeps it and stops the watcher. When GitHub reports an unambiguous
+merge, cleanup archives the exact owning Codex session, then rechecks the local
+identity and cleanliness and asks Herdr to remove the workspace and worktree
+without force. The workflow branch remains.
 
 Failure and cancellation keep all workflow state. The
 `cleanup-current-workflow` action uses the same archive-first transaction for a
