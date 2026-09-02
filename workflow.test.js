@@ -7,7 +7,7 @@ const test = require("node:test");
 const {
   codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup,
   openProgressPane, progressView, resolveRepository, shouldHandoffCleanup,
-  shouldRetryStalledPrompt, sourceDirectory,
+  shouldRetryStalledPrompt, sourceDirectory, stalledPromptRetryArgs,
 } = require("./controller.js");
 const {
   Lifecycle,
@@ -152,6 +152,9 @@ test("forwards Codex++ auto-account only when the executable advertises it", () 
   assert.deepEqual(codexAgentStartArgs("worker", "w1:p2", () => { throw new Error("probe failed"); }), base);
   assert.equal(shouldRetryStalledPrompt('{"error":{"code":"agent_prompt_stalled"}}'), true);
   assert.equal(shouldRetryStalledPrompt('{"error":{"code":"timeout"}}'), false);
+  assert.deepEqual(stalledPromptRetryArgs("worker"), [
+    "agent", "prompt", "worker", " ", "--wait", "--until", "working", "--until", "blocked", "--timeout", "5000",
+  ]);
 });
 
 test("refuses local, path, Git worktree, and Herdr collisions", () => {

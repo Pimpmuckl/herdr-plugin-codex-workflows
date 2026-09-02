@@ -79,6 +79,10 @@ function shouldRetryStalledPrompt(stderr) {
   return /"code"\s*:\s*"agent_prompt_stalled"/.test(stderr);
 }
 
+function stalledPromptRetryArgs(agentName) {
+  return ["agent", "prompt", agentName, " ", "--wait", "--until", "working", "--until", "blocked", "--timeout", "5000"];
+}
+
 function git(cwd, args) {
   return execute(gitBin, ["-C", cwd, ...args]);
 }
@@ -308,8 +312,9 @@ async function startParent(runtime, prompt) {
   child.once("close", (code) => {
     if (code !== 0 && shouldRetryStalledPrompt(stderr)) {
       try {
-        runHerdr(["agent", "send-keys", runtime.identity.agentName, "enter"]);
-        runHerdr(["agent", "wait", runtime.identity.agentName, "--until", "working", "--until", "blocked", "--timeout", "5000"]);
+        const agent = getAgent(runtime.identity.agentName);
+        if (agent?.agent_status !== "idle") throw new Error(compact(stderr) || "agent prompt stalled outside idle state");
+        runHerdr(stalledPromptRetryArgs(runtime.identity.agentName));
       } catch (error) {
         runtime.prompt.error = error;
       }
@@ -768,7 +773,7 @@ async function main() {
 }
 
 module.exports = { codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup, openProgressPane,
-  progressView, resolveRepository, shouldHandoffCleanup, shouldRetryStalledPrompt, sourceDirectory };
+  progressView, resolveRepository, shouldHandoffCleanup, shouldRetryStalledPrompt, sourceDirectory, stalledPromptRetryArgs };
 
 if (require.main === module) {
   main().catch((error) => {
