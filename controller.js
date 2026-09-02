@@ -105,8 +105,13 @@ function notify(title, body, sound = "request") {
   }
 }
 
+function canonicalRepositoryRoot(checkoutRoot, commonDirectory) {
+  return path.dirname(path.resolve(checkoutRoot, commonDirectory));
+}
+
 function repositoryAt(root) {
   root = git(root, ["rev-parse", "--show-toplevel"]);
+  root = canonicalRepositoryRoot(root, git(root, ["rev-parse", "--git-common-dir"]));
   const repo = parseGitHubRemote(git(root, ["remote", "get-url", "origin"]));
   return { root: path.resolve(root), repo, repoName: repo.split("/").pop() };
 }
@@ -309,8 +314,10 @@ async function startParent(runtime, prompt) {
     if (code !== 0 && shouldRetryStalledPrompt(stderr)) {
       try {
         const agent = getAgent(runtime.identity.agentName);
-        if (agent?.agent_status !== "idle") throw new Error(compact(stderr) || "agent prompt stalled outside idle state");
-        runHerdr(stalledPromptRetryArgs(runtime.identity.agentName));
+        if (agent?.agent_status === "idle") runHerdr(stalledPromptRetryArgs(runtime.identity.agentName));
+        else if (!agent || !["working", "blocked"].includes(agent.agent_status)) {
+          throw new Error(compact(stderr) || "agent prompt stalled outside a recoverable state");
+        }
       } catch (error) {
         runtime.prompt.error = error;
       }
@@ -771,7 +778,7 @@ async function main() {
   throw new Error("expected start, popup, progress, cleanup, or watch mode");
 }
 
-module.exports = { codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup, openProgressPane,
+module.exports = { canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup, openProgressPane,
   progressView, resolveRepository, shouldRetryStalledPrompt, sourceDirectory, stalledPromptRetryArgs };
 
 if (require.main === module) {

@@ -5,7 +5,7 @@ const net = require("node:net");
 const path = require("node:path");
 const test = require("node:test");
 const {
-  codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup,
+  canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup,
   openProgressPane, progressView, resolveRepository, shouldRetryStalledPrompt,
   sourceDirectory, stalledPromptRetryArgs,
 } = require("./controller.js");
@@ -108,6 +108,10 @@ test("shorthand follows the focused pane repository", () => {
     worktree: { repo_root: "C:\\Users\\jonat\\.codex" },
     workspace_cwd: "C:\\Users\\jonat\\.codex",
   }), "C:\\Code\\plugin");
+  assert.equal(canonicalRepositoryRoot(
+    "C:\\Code\\.worktrees\\plugin\\review-pr-1", "C:\\Code\\plugin\\.git",
+  ), "C:\\Code\\plugin");
+  assert.equal(canonicalRepositoryRoot("C:\\Code\\plugin", ".git"), "C:\\Code\\plugin");
 });
 
 test("opens a slim unfocused progress split under the invoking pane", () => {
