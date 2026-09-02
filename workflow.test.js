@@ -6,7 +6,8 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup,
-  openProgressPane, progressView, resolveRepository, shouldRetryStalledPrompt,
+  openProgressPane, progressView, resolveRepository, shouldHandoffCleanup,
+  shouldRetryStalledPrompt, sourceDirectory,
 } = require("./controller.js");
 const {
   Lifecycle,
@@ -99,6 +100,19 @@ test("opens popup on Herdr's active pane without rejected target flags", () => {
   assert.equal(args.includes("--target-pane"), false);
   assert.equal(args[args.indexOf("--cwd") + 1], __dirname);
   assert.equal(args.at(-1), "--focus");
+});
+
+test("shorthand follows the focused pane repository", () => {
+  assert.equal(sourceDirectory({
+    focused_pane_cwd: "C:\\Code\\plugin",
+    worktree: { repo_root: "C:\\Users\\jonat\\.codex" },
+    workspace_cwd: "C:\\Users\\jonat\\.codex",
+  }), "C:\\Code\\plugin");
+});
+
+test("only issue fixes hand off automatic cleanup", () => {
+  assert.equal(shouldHandoffCleanup("issue"), true);
+  assert.equal(shouldHandoffCleanup("pr"), false);
 });
 
 test("opens a slim unfocused progress split under the invoking pane", () => {

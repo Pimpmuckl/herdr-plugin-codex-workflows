@@ -107,10 +107,18 @@ function repositoryAt(root) {
   return { root: path.resolve(root), repo, repoName: repo.split("/").pop() };
 }
 
+function sourceDirectory(context) {
+  return context.focused_pane_cwd || context.worktree?.repo_root || context.worktree?.checkout_path || context.workspace_cwd;
+}
+
 function sourceRepository(context) {
-  const cwd = context.worktree?.repo_root || context.worktree?.checkout_path || context.workspace_cwd || context.focused_pane_cwd;
+  const cwd = sourceDirectory(context);
   if (!cwd) throw new Error("the action did not receive a workspace checkout");
   return repositoryAt(cwd);
+}
+
+function shouldHandoffCleanup(workflow) {
+  return workflow === "issue";
 }
 
 function resolveRepository(target, current, operations = {}) {
@@ -590,7 +598,7 @@ async function controller() {
     await monitor(runtime, repository);
     let releaseError = null;
     try { await releaseParent(runtime); } catch (error) { releaseError = error; console.error(`parent release failed: ${error.message}`); }
-    if (runtime.terminal?.status === "complete") {
+    if (runtime.terminal?.status === "complete" && shouldHandoffCleanup(runtime.workflow)) {
       try {
         if (releaseError) throw releaseError;
         await handoffCleanup(runtime, repository);
@@ -600,6 +608,9 @@ async function controller() {
         notify("Codex workflow cleanup stopped", "Automatic cleanup could not be armed; the workspace and branch remain.");
         console.error(`cleanup handoff failed: ${error.message}`);
       }
+    } else if (runtime.terminal?.status === "complete") {
+      try { projectCleanup(runtime.worktree.workspace.workspace_id, "retained"); }
+      catch (error) { console.error(`cleanup metadata update failed: ${error.message}`); }
     }
   } catch (error) {
     runtime.launch.status = "failed";
@@ -752,7 +763,7 @@ async function main() {
 }
 
 module.exports = { codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup, openProgressPane,
-  progressView, resolveRepository, shouldRetryStalledPrompt };
+  progressView, resolveRepository, shouldHandoffCleanup, shouldRetryStalledPrompt, sourceDirectory };
 
 if (require.main === module) {
   main().catch((error) => {
