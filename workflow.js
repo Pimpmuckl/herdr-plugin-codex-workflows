@@ -53,16 +53,16 @@ function parseSameRepositoryPullRequest(raw, repo) {
   return target;
 }
 
-function makeIdentity(workflow, target, headSha = "") {
+function makeIdentity(workflow, target = {}, headSha = "") {
   const nonce = crypto.randomBytes(3).toString("hex");
   const stem = workflow === "pr"
     ? `review-pr-${target.number}-${headSha.slice(0, 8)}`
-    : `issue-${target.number}`;
+    : workflow === "issue" ? `issue-${target.number}` : "task";
   return {
     branch: `codex/${stem}-${nonce}`,
     directory: `${stem}-${nonce}`,
     agentName: `cw-${nonce}`,
-    shortLabel: workflow === "pr" ? `PR-${target.number}` : `I-${target.number}`,
+    shortLabel: workflow === "pr" ? `PR-${target.number}` : workflow === "issue" ? `I-${target.number}` : `T-${nonce}`,
   };
 }
 

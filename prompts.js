@@ -16,6 +16,20 @@ function issuePrompt(input) {
 ${customInstructions(input)}`;
 }
 
+function taskPrompt(input) {
+  return `You are implementing this request on repository ${input.repo}:
+
+${input.request}
+
+1. Read and follow the applicable AGENTS.md. Investigate the repository and choose the smallest correct approach before editing.
+2. If the plan is tricky, use $ask-pro:ask-pro before implementation; otherwise run $review-suite:review-plan.
+3. Dispatch one implementation subagent to implement and validate the change. Review its work and keep it minimal.
+4. Run $ponytail:ponytail-review once, then $review-suite:review (note: herdrdev/herdr uses mode fast).
+5. Push the branch and open a pull request. Do not merge it. Handle CI and any automated reviewers present; verify findings and reply to every addressed inline comment.
+6. Leave a concise recap with the approach, implementation, validation, review state, and pull-request URL.
+`;
+}
+
 function prPrompt(input) {
   return `You are reviewing pull request ${input.prUrl} on repository ${input.repo}.
 
@@ -27,4 +41,4 @@ function prPrompt(input) {
 ${customInstructions(input)}`;
 }
 
-module.exports = { issuePrompt, prPrompt };
+module.exports = { issuePrompt, prPrompt, taskPrompt };

@@ -5,7 +5,7 @@ const fs = require("node:fs"), crypto = require("node:crypto");
 const path = require("node:path"), readline = require("node:readline");
 const readlinePromises = require("node:readline/promises"), { spawn, spawnSync } = require("node:child_process");
 const { stdin: input, stdout: output } = require("node:process");
-const { issuePrompt, prPrompt } = require("./prompts.js");
+const { issuePrompt, prPrompt, taskPrompt } = require("./prompts.js");
 const {
   associatedPr, cleanupTransaction, decodePayload, handoffWatcher, manualWorkspace, matchingOwnedSession, matchingSession, watch, withCleanupClaim,
 } = require("./cleanup.js");
@@ -19,7 +19,7 @@ const METADATA_SOURCE = "plugin:pimpmuckl.codex-workflows";
 const herdr = process.env.HERDR_BIN_PATH || "herdr", gitBin = process.env.GIT_BIN_PATH || "git";
 const gh = process.env.GH_BIN_PATH || "gh", codexBin = process.env.CODEX_BIN_PATH;
 const CODE_ROOT = path.dirname(WORKTREE_ROOT);
-const launchSteps = ["Resolve repository", "Verify GitHub target", "Create worktree", "Start Codex"];
+const launchSteps = ["Resolve repository", "Prepare request", "Create worktree", "Start Codex"];
 function readJson(value, fallback = null) {
   try {
     return JSON.parse(value);
@@ -39,6 +39,12 @@ function execute(command, args) {
 }
 function compact(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
+}
+function preserveLines(value) {
+  return String(value || "").replace(/\r\n?/g, "\n").trim();
+}
+function isImplementationWorkflow(workflow) {
+  return workflow !== "pr";
 }
 function succeeds(command, args) {
   const result = spawnSync(command, args, { stdio: "ignore" });
@@ -164,7 +170,7 @@ function requireGitHubAuth() {
   execute(gh, ["auth", "status", "--hostname", "github.com"]);
 }
 
-function issueBase(repository) {
+function implementationBase(repository) {
   const data = readJson(execute(gh, ["repo", "view", repository.repo, "--json", "nameWithOwner,defaultBranchRef"]));
   if (!data?.defaultBranchRef?.name || String(data.nameWithOwner || "").toLowerCase() !== repository.repo) {
     throw new Error("GitHub did not return the expected repository default branch");
@@ -269,7 +275,7 @@ function projectTerminal(runtime, report, candidate = getAgent(runtime.identity.
   try { owner = candidate && matchingSession([candidate], workspaceId, paneId); } catch {}
   if (owner) runtime.ownerSessionId = owner.agent_session.value;
   const stale = runtime.workflow === "pr" && report.status === "complete" && report["reviewed-head"].toLowerCase() !== report["current-head"].toLowerCase();
-  const resultText = report.status === "complete" ? (stale ? "complete · head changed" : runtime.workflow === "issue" ? "complete · PR open" : "complete") : report.status;
+  const resultText = report.status === "complete" ? (stale ? "complete · head changed" : isImplementationWorkflow(runtime.workflow) ? "complete · PR open" : "complete") : report.status;
   try {
     runHerdr(["workspace", "rename", workspaceId, `[${runtime.identity.shortLabel}] ${resultText}`]);
     runHerdr([
@@ -451,7 +457,7 @@ async function releaseParent(runtime) {
   await waitForShell(paneId, outsideCwd);
 }
 
-function issuePullRequest(runtime, repository, matches = readJson(execute(gh, [
+function implementationPullRequest(runtime, repository, matches = readJson(execute(gh, [
     "pr", "list", "--repo", repository.repo, "--head", runtime.identity.branch, "--state", "open",
     "--json", "number,url,headRefOid,baseRefName,headRefName",
   ]), [])) {
@@ -468,7 +474,7 @@ function issuePullRequest(runtime, repository, matches = readJson(execute(gh, [
 async function monitor(runtime, repository, operations = {}) {
   const workspace = operations.workspace || getWorkspace;
   const agentByName = operations.agent || getAgent;
-  const findIssuePullRequest = operations.issuePullRequest || issuePullRequest;
+  const findImplementationPullRequest = operations.implementationPullRequest || implementationPullRequest;
   const currentHead = operations.currentPullRequestHead || currentPullRequestHead;
   const updateProject = operations.project || project;
   const updateTerminal = operations.projectTerminal || projectTerminal;
@@ -500,8 +506,8 @@ async function monitor(runtime, repository, operations = {}) {
         continue;
       }
       wasSettled = true;
-      if (runtime.workflow === "issue") {
-        const pullRequest = findIssuePullRequest(runtime, repository);
+      if (isImplementationWorkflow(runtime.workflow)) {
+        const pullRequest = findImplementationPullRequest(runtime, repository);
         if (!pullRequest) {
           updateProject(runtime, "waiting");
           lastProjection = "waiting";
@@ -537,11 +543,12 @@ function progressView(launch, frame = 0) {
     + `[${"#".repeat(filled)}${".".repeat(width - filled)}] ${Math.round((complete / launchSteps.length) * 100)}% ${spinner} ${checkpoint}\n`;
 }
 
-function openInputPopup(pipeName, invoke = runHerdr) {
+function openInputPopup(pipeName, mode = "github", invoke = runHerdr) {
   const args = [
     "plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "input",
     "--cwd", __dirname,
     "--env", `HERDR_CODEX_WORKFLOW_PIPE=${pipeName}`,
+    "--env", `HERDR_CODEX_WORKFLOW_MODE=${mode}`,
     "--focus",
   ];
   invoke(args);
@@ -575,9 +582,9 @@ function controllerProtocol(runtime, lifecycle, resolveHello, resolveInput, reso
       if (connection.role === "input" && ["input", "cancel"].includes(message?.type)) {
         if (lifecycle.state !== "COLLECTING") throw new Error("input was already submitted");
         lifecycle.transition(message.type === "input" ? "submit" : "cancel");
-        resolveInput(message.type === "input" ? {
-          target: compact(message.target), instructions: String(message.instructions || "").replace(/\r\n?/g, "\n").trim(),
-        } : null);
+        resolveInput(message.type === "input" ? (runtime.workflow === "task"
+          ? { request: preserveLines(message.request) }
+          : { target: compact(message.target), instructions: preserveLines(message.instructions) }) : null);
         return {};
       }
       if (connection.role === "progress" && message?.type === "status") return { launch: { ...runtime.launch } };
@@ -592,7 +599,7 @@ function controllerProtocol(runtime, lifecycle, resolveHello, resolveInput, reso
   };
 }
 
-async function controller() {
+async function controller(mode = "github") {
   if (process.platform !== "win32") throw new Error("Codex Workflows supports Windows only");
   const context = readJson(process.env.HERDR_PLUGIN_CONTEXT_JSON, {});
   let repository = sourceRepository(context);
@@ -605,33 +612,38 @@ async function controller() {
   const helloPromise = new Promise((resolve) => { resolveHello = resolve; });
   const progressPromise = new Promise((resolve) => { resolveProgress = resolve; });
   const runtime = {
-    workflow: null, lifecycle, terminal: null,
+    workflow: mode === "task" ? "task" : null, lifecycle, terminal: null,
     launch: { status: "collecting", step: 0, repo: repository.repo, repositorySource: "current" },
   };
   const server = await createPipeServer(pipeName, controllerProtocol(runtime, lifecycle, resolveHello, resolveInput, resolveProgress));
 
   try {
-    openInputPopup(pipeName);
+    openInputPopup(pipeName, mode);
     await Promise.race([helloPromise, delay(30000).then(() => { throw new Error("input popup did not connect to its controller"); })]);
     const submission = await inputPromise;
     if (submission === null) return;
     runtime.launch.status = "running";
-    let target = parseTarget(submission.target, repository.repo);
-    runtime.launch.repo = target.repo;
-    runtime.launch.repositorySource = target.repositorySource;
+    let target;
+    if (runtime.workflow !== "task") {
+      target = parseTarget(submission.target, repository.repo);
+      runtime.launch.repo = target.repo;
+      runtime.launch.repositorySource = target.repositorySource;
+    }
     openProgressPane(pipeName, context);
     await Promise.race([progressPromise, delay(30000).then(() => { throw new Error("progress pane did not connect to its controller"); })]);
     await delay(0);
     requireGitHubAuth();
-    repository = resolveRepository(target, repository);
+    if (runtime.workflow !== "task") repository = resolveRepository(target, repository);
     runtime.launch.step = 1;
     await delay(0);
-    target = completeGitHubTarget(target, readJson(execute(gh, ["api", `repos/${repository.repo}/issues/${target.number}`])));
-    runtime.workflow = target.type;
+    if (runtime.workflow !== "task") {
+      target = completeGitHubTarget(target, readJson(execute(gh, ["api", `repos/${repository.repo}/issues/${target.number}`])));
+      runtime.workflow = target.type;
+    }
     let details;
     let identity;
-    if (runtime.workflow === "issue") {
-      details = issueBase(repository);
+    if (isImplementationWorkflow(runtime.workflow)) {
+      details = implementationBase(repository);
       identity = makeIdentity(runtime.workflow, target);
     } else {
       details = pullRequest(repository, target.number);
@@ -641,7 +653,7 @@ async function controller() {
     runtime.identity = identity; runtime.baseBranch = details.baseBranch; runtime.baseSha = details.baseSha;
     runtime.launch.step = 2;
     await delay(0);
-    runtime.worktree = createWorktree(repository, identity, runtime.workflow === "issue" ? details.baseSha : details.headSha);
+    runtime.worktree = createWorktree(repository, identity, isImplementationWorkflow(runtime.workflow) ? details.baseSha : details.headSha);
     project(runtime);
     const promptData = {
       repo: repository.repo,
@@ -649,11 +661,13 @@ async function controller() {
       branch: identity.branch,
       worktree: runtime.worktree.path,
       instructions: submission.instructions,
+      request: submission.request,
       ...details,
     };
     runtime.launch.step = 3;
     await delay(0);
-    await startParent(runtime, runtime.workflow === "issue" ? issuePrompt(promptData) : prPrompt(promptData));
+    const prompt = runtime.workflow === "task" ? taskPrompt(promptData) : runtime.workflow === "issue" ? issuePrompt(promptData) : prPrompt(promptData);
+    await startParent(runtime, prompt);
     lifecycle.transition("provisioned");
     runtime.launch.status = "started";
     runtime.launch.step = launchSteps.length;
@@ -724,7 +738,7 @@ async function popup() {
   try {
     let reply = await client.request({ type: "hello", role: "input" });
     if (!reply.ok) throw new Error(reply.error);
-    const value = await readPopupInput();
+    const value = await readPopupInput(process.env.HERDR_CODEX_WORKFLOW_MODE);
     reply = await client.request(value === null ? { type: "cancel" } : { type: "input", ...value });
     if (!reply.ok) throw new Error(reply.error);
   } finally {
@@ -741,14 +755,20 @@ async function progress() {
 }
 
 function popupInputView(state, width = output.columns || 80, height = output.rows || 10) {
-  const targetPrefix = `${state.active === 0 ? ">" : " "} Paste issue or PR: `;
-  const target = targetPrefix + [...state.values[0]].slice(-Math.max(1, width - targetPrefix.length - 1)).join("");
+  const task = state.mode === "task";
+  const inputIndex = task ? 0 : 1;
   const instructionWidth = Math.max(1, width - 3);
-  const wrapped = state.values[1].split("\n").flatMap((line) => {
+  const wrapped = state.values[inputIndex].split("\n").flatMap((line) => {
     const chars = [...line], lines = [];
     do lines.push(chars.splice(0, instructionWidth).join("")); while (chars.length);
     return lines;
   });
+  if (task) {
+    const rows = ["Describe the feature or fix:", ...wrapped.slice(-Math.max(1, height - 1)).map((line) => `  ${line}`)];
+    return `\x1b[2J\x1b[H${rows.join("\n")}\x1b[${rows.length};${[...rows.at(-1)].length + 1}H`;
+  }
+  const targetPrefix = `${state.active === 0 ? ">" : " "} Paste issue or PR: `;
+  const target = targetPrefix + [...state.values[0]].slice(-Math.max(1, width - targetPrefix.length - 1)).join("");
   const instructions = wrapped.slice(-Math.max(1, height - 3));
   const rows = [target, "─".repeat(Math.max(1, width - 1)), `${state.active === 1 ? ">" : " "} Custom instructions:`, ...instructions.map((line) => `  ${line}`)];
   const cursorRow = state.active === 0 ? 1 : rows.length;
@@ -759,27 +779,32 @@ function popupInputKey(state, sequence, key) {
   sequence ??= key.sequence;
   if (key.name === "escape" || (key.ctrl && key.name === "c") || ["\x1b[27u", "\x1b[99;5u"].includes(sequence)) return "cancel";
   if (["return", "enter"].includes(key.name) || sequence === "\x1b[13;2u") {
-    if (state.active === 1 && (key.shift || sequence === "\x1b[13;2u")) { state.values[1] += "\n"; return "render"; }
+    if ((state.mode === "task" || state.active === 1) && (key.shift || sequence === "\x1b[13;2u")) { state.values[state.active] += "\n"; return "render"; }
     return state.values[0].trim() ? "submit" : null;
   }
-  if (key.name === "tab") state.active = 1 - state.active;
-  else if (["right", "down"].includes(key.name)) state.active = 1;
-  else if (["left", "up"].includes(key.name)) state.active = 0;
+  if (state.mode !== "task" && key.name === "tab") state.active = 1 - state.active;
+  else if (state.mode !== "task" && ["right", "down"].includes(key.name)) state.active = 1;
+  else if (state.mode !== "task" && ["left", "up"].includes(key.name)) state.active = 0;
   else if (key.name === "backspace") state.values[state.active] = [...state.values[state.active]].slice(0, -1).join("");
   else if (sequence && !key.ctrl && !key.meta && !sequence.startsWith("\x1b")) state.values[state.active] += sequence.replace(/\r\n?/g, "\n").replace(/\t/g, "  ");
   else return null;
   return "render";
 }
 
-async function readPopupInput() {
+async function readPopupInput(mode = "github") {
   if (!input.isTTY || typeof input.setRawMode !== "function") {
     const rl = readlinePromises.createInterface({ input, output });
+    if (mode === "task") {
+      const request = preserveLines(await rl.question("Describe the feature or fix: "));
+      rl.close();
+      return request ? { request } : null;
+    }
     const target = compact(await rl.question("Paste issue or PR: "));
     const instructions = target ? compact(await rl.question("Custom instructions (optional): ")) : "";
     rl.close();
     return target ? { target, instructions } : null;
   }
-  const state = { active: 0, values: ["", ""] };
+  const state = { mode, active: 0, values: ["", ""] };
   output.write(`\x1b[>1u${popupInputView(state)}`);
   readline.emitKeypressEvents(input);
   input.setRawMode(true);
@@ -795,7 +820,9 @@ async function readPopupInput() {
     function onKey(sequence, key) {
       const action = popupInputKey(state, sequence, key);
       if (action === "cancel") return finish(null);
-      if (action === "submit") return finish({ target: compact(state.values[0]), instructions: state.values[1].trim() });
+      if (action === "submit") return finish(mode === "task"
+        ? { request: preserveLines(state.values[0]) }
+        : { target: compact(state.values[0]), instructions: preserveLines(state.values[1]) });
       if (action === "render") output.write(popupInputView(state));
     }
     input.on("keypress", onKey);
@@ -840,7 +867,7 @@ async function watcher(encodedPayload) {
 
 async function main() {
   const [mode, ...args] = process.argv.slice(2);
-  if (mode === "start") return controller();
+  if (mode === "start") return controller(args[0]);
   if (mode === "popup") return popup();
   if (mode === "progress") return progress();
   if (mode === "cleanup") return cleanup();
@@ -849,7 +876,7 @@ async function main() {
 }
 
 module.exports = { canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup, openProgressPane,
-  isAgentPromptStalled, issuePullRequest, monitor, popupInputKey, popupInputView, progressView, resolveRepository, sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands,
+  implementationPullRequest, isAgentPromptStalled, monitor, popupInputKey, popupInputView, progressView, resolveRepository, sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands,
   waitForActivity };
 
 if (require.main === module) {

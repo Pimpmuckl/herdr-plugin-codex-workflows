@@ -1,7 +1,7 @@
 # Herdr Codex Workflows
 
-Windows-only Herdr action for turning an issue into an open pull request or
-understanding an existing pull request in an isolated Codex workspace.
+Windows-only Herdr actions for turning a feature request or issue into an open
+pull request, or understanding an existing pull request in an isolated Codex workspace.
 
 ## Install
 
@@ -32,6 +32,12 @@ command = "pimpmuckl.codex-workflows.issue-to-pr"
 description = "issue or pull request"
 
 [[keys.command]]
+key = "alt+u"
+type = "plugin_action"
+command = "pimpmuckl.codex-workflows.feature-to-pr"
+description = "feature or fix"
+
+[[keys.command]]
 key = "alt+shift+x"
 type = "plugin_action"
 command = "pimpmuckl.codex-workflows.cleanup-current-workflow"
@@ -50,6 +56,9 @@ pull request. Issue workflows pin the fetched default-branch SHA and start one C
 parent that owns implementation, review, CI, and an open pull request. Review
 workflows check out the exact pull-request head SHA and start a read-only review.
 
+`feature-to-pr` uses the current repository. Its single multiline field accepts
+the feature or fix description. Enter starts the workflow; Shift+Enter adds a line.
+
 For a full link to another repository, the plugin reuses a matching
 `C:\Code\<repo>` checkout when present. Otherwise it clones to
 `C:\Code\<owner>\<repo>` before creating the isolated worktree.
@@ -64,11 +73,11 @@ lifecycle. When the canonical `codex` command advertises `--auto-account`, the
 controller forwards that startup option through Herdr; otherwise the launch is
 unchanged.
 
-An issue workflow with no pull request remains active. When Codex becomes idle
+An implementation workflow with no pull request remains active. When Codex becomes idle
 or done, its workspace is marked waiting. A blocked Codex stays marked blocked
 for human input. In each case, Codex, the controller, worktree, and workspace
 stay available for follow-up. The controller checks again after follow-up
-activity settles. Once an issue workflow has exactly one valid pull request,
+activity settles. Once an implementation workflow has exactly one valid pull request,
 or a pull-request review completes, the controller exits the owning Codex
 process, releases its Herdr command slot, and starts the detached cleanup
 watcher for that pull request.

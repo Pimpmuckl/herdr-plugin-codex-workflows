@@ -7,6 +7,7 @@ const { WORKTREE_ROOT, normalizePath, parseGitHubRemote, parseSameRepositoryPull
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TERMINAL_STATES = new Set(["complete", "failed", "cancelled"]);
+const WORKFLOW_KINDS = new Set(["issue", "pr", "task"]);
 
 class CleanupStop extends Error {}
 
@@ -15,9 +16,9 @@ function safeReason(error, fallback) {
 }
 
 function validatePayload(value) {
-  if (!value || value.version !== 1 || !["issue", "pr"].includes(value.workflow)
+  if (!value || value.version !== 1 || !WORKFLOW_KINDS.has(value.workflow)
     || !value.workspaceId || !value.rootPaneId || !value.worktreePath || !value.repoRoot
-    || !/^[^/\s]+\/[^/\s]+$/.test(value.repo) || !/^codex\/(?:issue|review-pr)-/.test(value.branch) || !UUID.test(value.sessionId)
+    || !/^[^/\s]+\/[^/\s]+$/.test(value.repo) || !/^codex\/(?:issue|review-pr|task)-/.test(value.branch) || !UUID.test(value.sessionId)
     || (value.prNumber !== null && (!Number.isSafeInteger(value.prNumber) || value.prNumber < 1))) {
     throw new Error("invalid cleanup watcher payload");
   }
@@ -61,7 +62,7 @@ function matchingOwnedSession(agents, workspaceId, rootPaneId, sessionId) {
 function manualWorkspace(workspace) {
   const worktree = workspace?.worktree, tokens = workspace?.tokens || {};
   if (!worktree?.is_linked_worktree || !TERMINAL_STATES.has(tokens.workflow_state)
-    || !["issue", "pr"].includes(tokens.workflow_kind) || !tokens.workflow_root_pane
+    || !WORKFLOW_KINDS.has(tokens.workflow_kind) || !tokens.workflow_root_pane
     || !UUID.test(tokens.workflow_session)) throw new CleanupStop("current workspace has no terminal Codex workflow metadata");
   if (tokens.workflow_controller !== "inactive") throw new CleanupStop("workflow controller is still active");
   return { worktree, tokens };

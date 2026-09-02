@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const test = require("node:test");
 const {
-  associatedPr, classifyPullRequest, cleanupTransaction, handoffWatcher, manualWorkspace, matchingOwnedSession, matchingSession, watch,
+  associatedPr, classifyPullRequest, cleanupTransaction, encodePayload, handoffWatcher, manualWorkspace, matchingOwnedSession, matchingSession, watch,
 } = require("./cleanup.js");
 
 const payload = {
@@ -58,10 +58,18 @@ test("captures exactly one idle root-pane Codex UUID", () => {
   assert.throws(() => matchingOwnedSession([agent()], "w9", "w9:p1", "019cbe72-e55b-73d1-87d8-4e01f1f75044"), /session changed/);
 });
 
-test("associates issue terminal URL and original review PR only", () => {
+test("associates implementation terminal URLs and the original review PR", () => {
   assert.equal(associatedPr("issue", { "pr-url": "https://github.com/owner/repo/pull/12" }, null, "owner/repo"), 12);
+  assert.equal(associatedPr("task", { "pr-url": "https://github.com/owner/repo/pull/13" }, null, "owner/repo"), 13);
   assert.equal(associatedPr("pr", {}, 7, "owner/repo"), 7);
   assert.throws(() => associatedPr("issue", { "pr-url": "https://github.com/other/repo/pull/12" }, null, "owner/repo"), /belongs to other\/repo/);
+});
+
+test("accepts task workflow cleanup metadata", async () => {
+  const taskPayload = { ...payload, workflow: "task", branch: "codex/task-abc123", worktreePath: "C:\\Code\\.worktrees\\repo\\task-abc123" };
+  assert.doesNotThrow(() => encodePayload(taskPayload));
+  const workspace = await fixture().ops.workspace();
+  assert.equal(manualWorkspace({ ...workspace, tokens: { ...workspace.tokens, workflow_kind: "task" } }).tokens.workflow_kind, "task");
 });
 
 test("classifies only unambiguous GitHub merge states", () => {

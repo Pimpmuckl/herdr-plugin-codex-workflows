@@ -6,15 +6,16 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup,
-  isAgentPromptStalled, issuePullRequest, monitor, openProgressPane, popupInputKey, popupInputView, progressView, resolveRepository,
+  implementationPullRequest, isAgentPromptStalled, monitor, openProgressPane, popupInputKey, popupInputView, progressView, resolveRepository,
   sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands, waitForActivity,
 } = require("./controller.js");
-const { issuePrompt, prPrompt } = require("./prompts.js");
+const { issuePrompt, prPrompt, taskPrompt } = require("./prompts.js");
 const {
   Lifecycle,
   collisionReason,
   connectPipe,
   createPipeServer,
+  makeIdentity,
   makePipeName,
   parseGitHubRemote,
   parseTarget,
@@ -96,10 +97,11 @@ test("normalizes common GitHub origin forms", () => {
 
 test("opens popup on Herdr's active pane without rejected target flags", () => {
   let args;
-  openInputPopup("pipe-1", (value) => { args = value; });
+  openInputPopup("pipe-1", "task", (value) => { args = value; });
   assert.equal(args.includes("--workspace"), false);
   assert.equal(args.includes("--target-pane"), false);
   assert.equal(args[args.indexOf("--cwd") + 1], __dirname);
+  assert.equal(args[args.indexOf("HERDR_CODEX_WORKFLOW_MODE=task") - 1], "--env");
   assert.equal(args.at(-1), "--focus");
 });
 
@@ -128,6 +130,23 @@ test("popup edits and renders multiline custom instructions", () => {
   assert.doesNotMatch(issuePrompt({ ...promptInput, instructions: "" }), /Custom Instructions/);
   assert.match(issuePrompt(promptInput), /\$review-suite:review \(note: herdrdev\/herdr uses mode fast\)/);
   assert.match(prPrompt(promptInput), /\$review-suite:review \(note: herdrdev\/herdr uses mode fast\)/);
+});
+
+test("task input and prompt preserve a multiline request", () => {
+  const state = { mode: "task", active: 0, values: ["Build the thing", ""] };
+  assert.match(popupInputView(state, 40, 5), /Describe the feature or fix:\n  Build the thing/);
+  assert.equal(popupInputKey(state, "\x1b[13;2u", {}), "render");
+  popupInputKey(state, "Then test it", {});
+  assert.equal(state.values[0], "Build the thing\nThen test it");
+  assert.equal(popupInputKey(state, "", { name: "return" }), "submit");
+
+  const identity = makeIdentity("task");
+  assert.match(identity.branch, /^codex\/task-[0-9a-f]{6}$/);
+  assert.equal(identity.directory, identity.branch.slice("codex/".length));
+  const prompt = taskPrompt({ repo: "owner/repo", request: state.values[0] });
+  assert.match(prompt, /Build the thing\nThen test it/);
+  assert.match(prompt, /tricky.*\$ask-pro:ask-pro.*otherwise.*\$review-suite:review-plan/);
+  assert.doesNotMatch(prompt, /Custom Instructions/);
 });
 
 test("shorthand follows the focused pane repository", () => {
@@ -170,6 +189,14 @@ test("progress can observe launch status after input submits", async () => {
   assert.equal(progressHello, true);
   assert.deepEqual(submitted, { target: "#42", instructions: "focus startup\nthen test" });
   assert.equal((await protocol.message({ type: "status" }, progressConnection)).launch.status, "running");
+
+  const taskLifecycle = new Lifecycle(), taskRuntime = { workflow: "task", launch: {} };
+  let taskSubmission;
+  const taskProtocol = controllerProtocol(taskRuntime, taskLifecycle, () => {}, (value) => { taskSubmission = value; });
+  const taskConnection = {};
+  await taskProtocol.message({ type: "hello", role: "input" }, taskConnection);
+  await taskProtocol.message({ type: "input", request: "Build it\r\nThen test it" }, taskConnection);
+  assert.deepEqual(taskSubmission, { request: "Build it\nThen test it" });
 });
 
 test("forwards Codex++ auto-account only when the executable advertises it", () => {
@@ -212,7 +239,7 @@ test("issue completion waits for a PR and rechecks after follow-up activity", as
   let completed = false;
   const monitoring = monitor(runtime, {}, {
     workspace: () => ({}), agent: () => ({ agent_status: "idle" }),
-    issuePullRequest: () => ++checks === 1 ? null : ({ number: 12, url: "https://github.com/owner/repo/pull/12", headRefOid: "head" }),
+    implementationPullRequest: () => ++checks === 1 ? null : ({ number: 12, url: "https://github.com/owner/repo/pull/12", headRefOid: "head" }),
     project: (_runtime, state) => projections.push(state), projectTerminal: () => {},
     activity: async () => {
       reachedWaiting();
@@ -231,12 +258,28 @@ test("issue completion waits for a PR and rechecks after follow-up activity", as
   assert.equal(runtime.terminal["pr-url"], "https://github.com/owner/repo/pull/12");
 });
 
-test("issue PR lookup distinguishes zero, multiple, and invalid matches", () => {
+test("task completion uses the implementation pull request path", async () => {
+  const lifecycle = new Lifecycle();
+  lifecycle.transition("submit");
+  lifecycle.transition("provisioned");
+  const runtime = {
+    workflow: "task", lifecycle, terminal: null, prompt: { finished: true },
+    identity: { agentName: "worker" }, worktree: { workspace: { workspace_id: "w1" } },
+  };
+  await monitor(runtime, {}, {
+    workspace: () => ({}), agent: () => ({ agent_status: "idle" }),
+    implementationPullRequest: () => ({ number: 13, url: "https://github.com/owner/repo/pull/13", headRefOid: "head" }),
+    projectTerminal: () => {},
+  });
+  assert.equal(runtime.terminal["pr-url"], "https://github.com/owner/repo/pull/13");
+});
+
+test("implementation PR lookup distinguishes zero, multiple, and invalid matches", () => {
   const runtime = { identity: { branch: "codex/issue-1-a" }, baseBranch: "master", baseSha: "base", worktree: { path: "." } };
   const repository = { repo: "owner/repo" };
-  assert.equal(issuePullRequest(runtime, repository, []), null);
-  assert.throws(() => issuePullRequest(runtime, repository, [{}, {}]), /multiple open pull requests/);
-  assert.throws(() => issuePullRequest(runtime, repository, [{}]), /does not connect the pinned base/);
+  assert.equal(implementationPullRequest(runtime, repository, []), null);
+  assert.throws(() => implementationPullRequest(runtime, repository, [{}, {}]), /multiple open pull requests/);
+  assert.throws(() => implementationPullRequest(runtime, repository, [{}]), /does not connect the pinned base/);
 });
 
 test("activity wait returns control when its agent disappears", () => {

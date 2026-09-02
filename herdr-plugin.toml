@@ -2,7 +2,7 @@ id = "pimpmuckl.codex-workflows"
 name = "Codex Workflows"
 version = "0.1.0"
 min_herdr_version = "0.8.2"
-description = "Start issue fixes and pull-request reviews in isolated Codex workspaces."
+description = "Start feature work, issue fixes, and pull-request reviews in isolated Codex workspaces."
 platforms = ["windows"]
 
 [[actions]]
@@ -10,6 +10,12 @@ id = "issue-to-pr"
 title = "Issue or pull request"
 contexts = ["workspace", "tab", "pane"]
 command = ["node", "controller.js", "start"]
+
+[[actions]]
+id = "feature-to-pr"
+title = "Feature or fix"
+contexts = ["workspace", "tab", "pane"]
+command = ["node", "controller.js", "start", "task"]
 
 [[actions]]
 id = "cleanup-current-workflow"
