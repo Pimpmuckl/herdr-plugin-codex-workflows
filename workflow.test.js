@@ -6,9 +6,10 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup,
-  isAgentPromptStalled, issuePullRequest, monitor, openProgressPane, progressView, resolveRepository,
+  isAgentPromptStalled, issuePullRequest, monitor, openProgressPane, popupInputKey, popupInputView, progressView, resolveRepository,
   sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands, waitForActivity,
 } = require("./controller.js");
+const { issuePrompt, prPrompt } = require("./prompts.js");
 const {
   Lifecycle,
   collisionReason,
@@ -102,6 +103,20 @@ test("opens popup on Herdr's active pane without rejected target flags", () => {
   assert.equal(args.at(-1), "--focus");
 });
 
+test("popup keeps custom instructions separate from the GitHub target", () => {
+  const state = { active: 0, values: ["", ""] };
+  popupInputKey(state, "#42", {});
+  popupInputKey(state, "", { name: "down" });
+  popupInputKey(state, "focus startup", {});
+  assert.deepEqual(state, { active: 1, values: ["#42", "focus startup"] });
+  assert.match(popupInputView(state), /> Custom instructions: focus startup/);
+  assert.equal(popupInputKey(state, "", { name: "return" }), "submit");
+
+  const input = { repo: "owner/repo", target: { input: "#42" }, instructions: "focus startup" };
+  assert.match(issuePrompt(input), /Additional user instructions \(task context\): "focus startup"/);
+  assert.match(prPrompt(input), /Additional user instructions \(task context\): "focus startup"/);
+});
+
 test("shorthand follows the focused pane repository", () => {
   assert.equal(sourceDirectory({
     focused_pane_cwd: "C:\\Code\\plugin",
@@ -135,12 +150,12 @@ test("progress can observe launch status after input submits", async () => {
   const protocol = controllerProtocol(runtime, lifecycle, () => { hello = true; }, (value) => { submitted = value; }, () => { progressHello = true; });
   const inputConnection = {}, progressConnection = {};
   await protocol.message({ type: "hello", role: "input" }, inputConnection);
-  await protocol.message({ type: "input", value: "#42" }, inputConnection);
+  await protocol.message({ type: "input", target: "#42", instructions: "focus startup" }, inputConnection);
   runtime.launch.status = "running";
   await protocol.message({ type: "hello", role: "progress" }, progressConnection);
   assert.equal(hello, true);
   assert.equal(progressHello, true);
-  assert.equal(submitted, "#42");
+  assert.deepEqual(submitted, { target: "#42", instructions: "focus startup" });
   assert.equal((await protocol.message({ type: "status" }, progressConnection)).launch.status, "running");
 });
 

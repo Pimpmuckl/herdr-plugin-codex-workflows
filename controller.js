@@ -575,7 +575,9 @@ function controllerProtocol(runtime, lifecycle, resolveHello, resolveInput, reso
       if (connection.role === "input" && ["input", "cancel"].includes(message?.type)) {
         if (lifecycle.state !== "COLLECTING") throw new Error("input was already submitted");
         lifecycle.transition(message.type === "input" ? "submit" : "cancel");
-        resolveInput(message.type === "input" ? compact(message.value) : null);
+        resolveInput(message.type === "input" ? {
+          target: compact(message.target), instructions: compact(message.instructions),
+        } : null);
         return {};
       }
       if (connection.role === "progress" && message?.type === "status") return { launch: { ...runtime.launch } };
@@ -611,10 +613,10 @@ async function controller() {
   try {
     openInputPopup(pipeName);
     await Promise.race([helloPromise, delay(30000).then(() => { throw new Error("input popup did not connect to its controller"); })]);
-    const raw = await inputPromise;
-    if (raw === null) return;
+    const submission = await inputPromise;
+    if (submission === null) return;
     runtime.launch.status = "running";
-    let target = parseTarget(raw, repository.repo);
+    let target = parseTarget(submission.target, repository.repo);
     runtime.launch.repo = target.repo;
     runtime.launch.repositorySource = target.repositorySource;
     openProgressPane(pipeName, context);
@@ -646,6 +648,7 @@ async function controller() {
       target,
       branch: identity.branch,
       worktree: runtime.worktree.path,
+      instructions: submission.instructions,
       ...details,
     };
     runtime.launch.step = 3;
@@ -721,9 +724,8 @@ async function popup() {
   try {
     let reply = await client.request({ type: "hello", role: "input" });
     if (!reply.ok) throw new Error(reply.error);
-    output.write("\x1b[2J\x1b[H");
-    const value = await readPopupInput("Paste issue or PR below:");
-    reply = await client.request(value === null ? { type: "cancel" } : { type: "input", value });
+    const value = await readPopupInput();
+    reply = await client.request(value === null ? { type: "cancel" } : { type: "input", ...value });
     if (!reply.ok) throw new Error(reply.error);
   } finally {
     client.socket.end();
@@ -738,19 +740,37 @@ async function progress() {
   finally { client.socket.end(); }
 }
 
-async function readPopupInput(promptText) {
+function popupInputView(state) {
+  return `\x1b[2J\x1b[H${state.active === 0 ? ">" : " "} Paste issue or PR: ${state.values[0]}\n`
+    + `${state.active === 1 ? ">" : " "} Custom instructions: ${state.values[1]}`;
+}
+
+function popupInputKey(state, sequence, key) {
+  if (key.name === "escape" || (key.ctrl && key.name === "c")) return "cancel";
+  if (["return", "enter"].includes(key.name)) return state.values[0].trim() ? "submit" : null;
+  if (key.name === "tab") state.active = 1 - state.active;
+  else if (["right", "down"].includes(key.name)) state.active = 1;
+  else if (["left", "up"].includes(key.name)) state.active = 0;
+  else if (key.name === "backspace") state.values[state.active] = [...state.values[state.active]].slice(0, -1).join("");
+  else if (sequence && !key.ctrl && !key.meta && !sequence.startsWith("\x1b")) state.values[state.active] += sequence;
+  else return null;
+  return "render";
+}
+
+async function readPopupInput() {
   if (!input.isTTY || typeof input.setRawMode !== "function") {
     const rl = readlinePromises.createInterface({ input, output });
-    const value = compact(await rl.question(promptText));
+    const target = compact(await rl.question("Paste issue or PR: "));
+    const instructions = target ? compact(await rl.question("Custom instructions (optional): ")) : "";
     rl.close();
-    return value || null;
+    return target ? { target, instructions } : null;
   }
-  output.write(`${promptText}\n> `);
+  const state = { active: 0, values: ["", ""] };
+  output.write(popupInputView(state));
   readline.emitKeypressEvents(input);
   input.setRawMode(true);
   input.resume();
   return new Promise((resolve) => {
-    let value = "";
     function finish(result) {
       input.off("keypress", onKey);
       input.setRawMode(false);
@@ -759,19 +779,10 @@ async function readPopupInput(promptText) {
       resolve(result);
     }
     function onKey(sequence, key) {
-      if (key.name === "escape" || (key.ctrl && key.name === "c")) return finish(null);
-      if (key.name === "return") return value.trim() ? finish(compact(value)) : undefined;
-      if (key.name === "backspace") {
-        if (value) {
-          value = [...value].slice(0, -1).join("");
-          output.write("\b \b");
-        }
-        return;
-      }
-      if (sequence && !key.ctrl && !key.meta && !sequence.startsWith("\x1b")) {
-        value += sequence;
-        output.write(sequence);
-      }
+      const action = popupInputKey(state, sequence, key);
+      if (action === "cancel") return finish(null);
+      if (action === "submit") return finish({ target: compact(state.values[0]), instructions: compact(state.values[1]) });
+      if (action === "render") output.write(popupInputView(state));
     }
     input.on("keypress", onKey);
   });
@@ -824,7 +835,7 @@ async function main() {
 }
 
 module.exports = { canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup, openProgressPane,
-  isAgentPromptStalled, issuePullRequest, monitor, progressView, resolveRepository, sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands,
+  isAgentPromptStalled, issuePullRequest, monitor, popupInputKey, popupInputView, progressView, resolveRepository, sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands,
   waitForActivity };
 
 if (require.main === module) {
