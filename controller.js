@@ -603,14 +603,11 @@ async function controller() {
     project(runtime);
     await monitor(runtime, repository);
     let releaseError = null;
-    try { await releaseParent(runtime); }
-    catch (error) {
-      console.error(`parent release failed: ${error.message}`);
-      try { if (getAgent(runtime.identity.agentName)) releaseError = error; }
-      catch { releaseError = error; }
-    }
+    try { await releaseParent(runtime); } catch (error) { releaseError = error; console.error(`parent release failed: ${error.message}`); }
     if (runtime.terminal?.status === "complete" && releaseError) {
-      notify("Codex workflow release failed", "The workspace and Codex agent remain available for inspection.");
+      try { projectCleanup(runtime.worktree.workspace.workspace_id, "stopped"); }
+      catch (error) { console.error(`cleanup metadata update failed: ${error.message}`); }
+      notify("Codex workflow release failed", "The workspace remains. Close any active Codex agent before cleanup.");
     } else if (runtime.terminal?.status === "complete" && runtime.workflow === "issue") {
       try {
         await handoffCleanup(runtime, repository);
