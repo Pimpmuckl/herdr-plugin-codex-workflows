@@ -75,6 +75,20 @@ function codexAgentStartArgs(agentName, paneId, readHelp = () => runCanonicalCod
   return args;
 }
 
+function shouldRetryStalledPrompt(stderr) {
+  return /"code"\s*:\s*"agent_prompt_stalled"/.test(stderr);
+}
+
+function stalledPromptRecovery(status) {
+  if (["idle", "done"].includes(status)) return "retry";
+  if (["working", "blocked"].includes(status)) return "started";
+  return "failed";
+}
+
+function stalledPromptRetryArgs(agentName, prompt) {
+  return ["agent", "prompt", agentName, `\n\n${prompt}`, "--wait", "--until", "working", "--until", "blocked", "--timeout", "5000"];
+}
+
 function git(cwd, args) {
   return execute(gitBin, ["-C", cwd, ...args]);
 }
@@ -97,14 +111,24 @@ function notify(title, body, sound = "request") {
   }
 }
 
+function canonicalRepositoryRoot(checkoutRoot, commonDirectory) {
+  const commonRoot = path.resolve(checkoutRoot, commonDirectory);
+  return path.basename(commonRoot) === ".git" ? path.dirname(commonRoot) : path.resolve(checkoutRoot);
+}
+
 function repositoryAt(root) {
   root = git(root, ["rev-parse", "--show-toplevel"]);
+  root = canonicalRepositoryRoot(root, git(root, ["rev-parse", "--git-common-dir"]));
   const repo = parseGitHubRemote(git(root, ["remote", "get-url", "origin"]));
   return { root: path.resolve(root), repo, repoName: repo.split("/").pop() };
 }
 
+function sourceDirectory(context) {
+  return context.focused_pane_cwd || context.worktree?.repo_root || context.worktree?.checkout_path || context.workspace_cwd;
+}
+
 function sourceRepository(context) {
-  const cwd = context.worktree?.repo_root || context.worktree?.checkout_path || context.workspace_cwd || context.focused_pane_cwd;
+  const cwd = sourceDirectory(context);
   if (!cwd) throw new Error("the action did not receive a workspace checkout");
   return repositoryAt(cwd);
 }
@@ -146,6 +170,11 @@ function issueBase(repository) {
     baseBranch: data.defaultBranchRef.name,
     baseSha: fetchPinned(repository, `refs/heads/${data.defaultBranchRef.name}`),
   };
+}
+
+function completeGitHubTarget(target, data) {
+  if (Number(data?.number) !== target.number || !data?.html_url) throw new Error("GitHub did not return the requested issue or pull request");
+  return { ...target, type: data.pull_request ? "pr" : "issue", url: data.html_url };
 }
 
 function pullRequest(repository, number) {
@@ -289,6 +318,20 @@ async function startParent(runtime, prompt) {
   child.stderr.on("data", (chunk) => { stderr += chunk; });
   child.once("error", (error) => { runtime.prompt.error = error; });
   child.once("close", (code) => {
+    if (code !== 0 && shouldRetryStalledPrompt(stderr)) {
+      try {
+        const agent = getAgent(runtime.identity.agentName);
+        const recovery = stalledPromptRecovery(agent?.agent_status);
+        if (recovery === "retry") runHerdr(stalledPromptRetryArgs(runtime.identity.agentName, prompt));
+        else if (recovery === "failed") {
+          throw new Error(compact(stderr) || "agent prompt stalled outside a recoverable state");
+        }
+      } catch (error) {
+        runtime.prompt.error = error;
+      }
+      runtime.prompt.finished = true;
+      return;
+    }
     runtime.prompt.finished = true;
     if (code !== 0) runtime.prompt.error = new Error(compact(stderr) || `agent prompt exited ${code}`);
   });
@@ -443,35 +486,71 @@ async function monitor(runtime, repository) {
   }
 }
 
-function progressView(workflow, launch, frame = 0) {
+function progressView(launch, frame = 0) {
   const step = Math.max(0, Math.min(launchSteps.length, Number(launch.step) || 0));
   const complete = launch.status === "started" ? launchSteps.length : step;
-  const width = 24, filled = Math.round((complete / launchSteps.length) * width);
+  const width = 20, filled = Math.round((complete / launchSteps.length) * width);
   const spinner = "|/-\\"[frame % 4];
   const source = launch.repositorySource === "link" ? "full link" : "current workspace";
-  const rows = launchSteps.map((label, index) => {
-    const marker = index < complete ? "[x]" : launch.status === "running" && index === step ? `[${spinner}]` : "[ ]";
-    return `${marker} ${label}`;
-  });
-  return `\x1b[2J\x1b[H${workflow === "issue" ? "Issue to pull request" : "Understand pull request"}\n`
-    + `Repository: ${launch.repo} (${source})\n`
-    + `[${"#".repeat(filled)}${".".repeat(width - filled)}] ${Math.round((complete / launchSteps.length) * 100)}%\n`
-    + `${rows.join("\n")}\n`;
+  const checkpoint = launch.status === "started" ? "Codex started" : launchSteps[Math.min(step, launchSteps.length - 1)];
+  return `\x1b[2J\x1b[H${launch.repo} (${source})\n`
+    + `[${"#".repeat(filled)}${".".repeat(width - filled)}] ${Math.round((complete / launchSteps.length) * 100)}% ${spinner} ${checkpoint}\n`;
 }
 
-function openInputPopup(pipeName, workflow, repo, invoke = runHerdr) {
+function openInputPopup(pipeName, invoke = runHerdr) {
   const args = [
     "plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "input",
     "--cwd", __dirname,
     "--env", `HERDR_CODEX_WORKFLOW_PIPE=${pipeName}`,
-    "--env", `HERDR_CODEX_WORKFLOW_KIND=${workflow}`,
-    "--env", `HERDR_CODEX_WORKFLOW_REPO=${repo}`,
     "--focus",
   ];
   invoke(args);
 }
 
-async function controller(workflow) {
+function openProgressPane(pipeName, context, open = runHerdrJson, resize = runHerdr) {
+  if (!context.focused_pane_id) throw new Error("the action did not receive a focused pane");
+  open([
+    "plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "progress",
+    "--placement", "split", "--target-pane", context.focused_pane_id, "--direction", "down",
+    "--cwd", __dirname, "--env", `HERDR_CODEX_WORKFLOW_PIPE=${pipeName}`, "--no-focus",
+  ]);
+  resize(["pane", "resize", "--pane", context.focused_pane_id, "--direction", "down", "--amount", "0.4"]);
+}
+
+function controllerProtocol(runtime, lifecycle, resolveHello, resolveInput, resolveProgress = () => {}) {
+  return {
+    async message(message, connection) {
+      if (message?.type === "hello" && message.role === "input") {
+        if (lifecycle.state !== "COLLECTING" || runtime.inputConnected) throw new Error("controller is not collecting input");
+        connection.role = "input";
+        runtime.inputConnected = true;
+        resolveHello();
+        return {};
+      }
+      if (message?.type === "hello" && message.role === "progress") {
+        connection.role = "progress";
+        resolveProgress();
+        return {};
+      }
+      if (connection.role === "input" && ["input", "cancel"].includes(message?.type)) {
+        if (lifecycle.state !== "COLLECTING") throw new Error("input was already submitted");
+        lifecycle.transition(message.type === "input" ? "submit" : "cancel");
+        resolveInput(message.type === "input" ? compact(message.value) : null);
+        return {};
+      }
+      if (connection.role === "progress" && message?.type === "status") return { launch: { ...runtime.launch } };
+      throw new Error("unsupported workflow message");
+    },
+    disconnect(connection) {
+      if (connection.role === "input" && lifecycle.state === "COLLECTING") {
+        lifecycle.transition("cancel");
+        resolveInput(null);
+      }
+    },
+  };
+}
+
+async function controller() {
   if (process.platform !== "win32") throw new Error("Codex Workflows supports Windows only");
   const context = readJson(process.env.HERDR_PLUGIN_CONTEXT_JSON, {});
   let repository = sourceRepository(context);
@@ -479,66 +558,48 @@ async function controller(workflow) {
   const pipeName = makePipeName();
   let resolveInput;
   let resolveHello;
+  let resolveProgress;
   const inputPromise = new Promise((resolve) => { resolveInput = resolve; });
   const helloPromise = new Promise((resolve) => { resolveHello = resolve; });
+  const progressPromise = new Promise((resolve) => { resolveProgress = resolve; });
   const runtime = {
-    workflow, lifecycle, pipeName, terminal: null,
+    workflow: null, lifecycle, terminal: null,
     launch: { status: "collecting", step: 0, repo: repository.repo, repositorySource: "current" },
   };
-  const server = await createPipeServer(pipeName, {
-    async message(message, connection) {
-      if (message?.type === "hello") {
-        if (lifecycle.state !== "COLLECTING" || runtime.popupConnected) throw new Error("controller is not collecting input");
-        connection.popup = true;
-        runtime.popupConnected = true;
-        resolveHello();
-        return {};
-      }
-      if (connection.popup && ["input", "cancel"].includes(message?.type)) {
-        if (lifecycle.state !== "COLLECTING") throw new Error("input was already submitted");
-        lifecycle.transition(message.type === "input" ? "submit" : "cancel");
-        resolveInput(message.type === "input" ? compact(message.value) : null);
-        return {};
-      }
-      if (connection.popup && message?.type === "status") return { launch: { ...runtime.launch } };
-      throw new Error("unsupported popup message");
-    },
-    disconnect(connection) {
-      if (connection.popup && lifecycle.state === "COLLECTING") {
-        lifecycle.transition("cancel");
-        resolveInput(null);
-      }
-    },
-  });
+  const server = await createPipeServer(pipeName, controllerProtocol(runtime, lifecycle, resolveHello, resolveInput, resolveProgress));
 
   try {
-    openInputPopup(pipeName, workflow, repository.repo);
+    openInputPopup(pipeName);
     await Promise.race([helloPromise, delay(30000).then(() => { throw new Error("input popup did not connect to its controller"); })]);
     const raw = await inputPromise;
     if (raw === null) return;
     runtime.launch.status = "running";
-    const target = parseTarget(workflow, raw, repository.repo);
+    let target = parseTarget(raw, repository.repo);
     runtime.launch.repo = target.repo;
     runtime.launch.repositorySource = target.repositorySource;
+    openProgressPane(pipeName, context);
+    await Promise.race([progressPromise, delay(30000).then(() => { throw new Error("progress pane did not connect to its controller"); })]);
+    await delay(0);
     requireGitHubAuth();
     repository = resolveRepository(target, repository);
     runtime.launch.step = 1;
     await delay(0);
+    target = completeGitHubTarget(target, readJson(execute(gh, ["api", `repos/${repository.repo}/issues/${target.number}`])));
+    runtime.workflow = target.type;
     let details;
     let identity;
-    if (workflow === "issue") {
+    if (runtime.workflow === "issue") {
       details = issueBase(repository);
-      if (target.number) target.url ||= `https://github.com/${repository.repo}/issues/${target.number}`;
-      identity = makeIdentity(workflow, target);
+      identity = makeIdentity(runtime.workflow, target);
     } else {
       details = pullRequest(repository, target.number);
-      identity = makeIdentity(workflow, target, details.headSha);
+      identity = makeIdentity(runtime.workflow, target, details.headSha);
       runtime.prNumber = details.prNumber; runtime.headSha = details.headSha;
     }
     runtime.identity = identity; runtime.baseBranch = details.baseBranch; runtime.baseSha = details.baseSha;
     runtime.launch.step = 2;
     await delay(0);
-    runtime.worktree = createWorktree(repository, identity, workflow === "issue" ? details.baseSha : details.headSha);
+    runtime.worktree = createWorktree(repository, identity, runtime.workflow === "issue" ? details.baseSha : details.headSha);
     project(runtime);
     const promptData = {
       repo: repository.repo,
@@ -549,7 +610,7 @@ async function controller(workflow) {
     };
     runtime.launch.step = 3;
     await delay(0);
-    await startParent(runtime, workflow === "issue" ? issuePrompt(promptData) : prPrompt(promptData));
+    await startParent(runtime, runtime.workflow === "issue" ? issuePrompt(promptData) : prPrompt(promptData));
     lifecycle.transition("provisioned");
     runtime.launch.status = "started";
     runtime.launch.step = launchSteps.length;
@@ -558,9 +619,12 @@ async function controller(workflow) {
     await monitor(runtime, repository);
     let releaseError = null;
     try { await releaseParent(runtime); } catch (error) { releaseError = error; console.error(`parent release failed: ${error.message}`); }
-    if (runtime.terminal?.status === "complete") {
+    if (runtime.terminal?.status === "complete" && releaseError) {
+      try { projectCleanup(runtime.worktree.workspace.workspace_id, "stopped"); }
+      catch (error) { console.error(`cleanup metadata update failed: ${error.message}`); }
+      notify("Codex workflow release failed", "The workspace remains. Close any active Codex agent before cleanup.");
+    } else if (runtime.terminal?.status === "complete" && runtime.workflow === "issue") {
       try {
-        if (releaseError) throw releaseError;
         await handoffCleanup(runtime, repository);
       }
       catch (error) {
@@ -568,11 +632,14 @@ async function controller(workflow) {
         notify("Codex workflow cleanup stopped", "Automatic cleanup could not be armed; the workspace and branch remain.");
         console.error(`cleanup handoff failed: ${error.message}`);
       }
+    } else if (runtime.terminal?.status === "complete") {
+      try { projectCleanup(runtime.worktree.workspace.workspace_id, "retained"); }
+      catch (error) { console.error(`cleanup metadata update failed: ${error.message}`); }
     }
   } catch (error) {
     runtime.launch.status = "failed";
     runtime.launch.error = error.message;
-    if (runtime.popupConnected) await delay(100);
+    if (runtime.inputConnected) await delay(100);
     if (runtime.prompt) try { await stopParent(runtime); } catch (stopError) { console.error(`parent shutdown failed: ${stopError.message}`); }
     if (!["COMPLETE", "FAILED", "CANCELLED"].includes(lifecycle.state)) lifecycle.transition("fail");
     if (runtime.worktree) {
@@ -588,47 +655,50 @@ async function controller(workflow) {
   }
 }
 
-async function showLaunchProgress(client, workflow) {
-  let launch = { status: "running", step: 0, repo: process.env.HERDR_CODEX_WORKFLOW_REPO, repositorySource: "current" };
+async function showLaunchProgress(client) {
+  let reply = await client.request({ type: "hello", role: "progress" });
+  if (!reply.ok) throw new Error(reply.error);
+  let launch = { status: "running", step: 0, repo: "Starting workflow", repositorySource: "current" };
   for (let frame = 0; ; frame += 1) {
-    let reply, failure, settled = false;
+    let failure, settled = false;
+    reply = null;
     client.request({ type: "status" }).then((value) => { reply = value; settled = true; }, (error) => { failure = error; settled = true; });
     while (!settled) {
-      output.write(progressView(workflow, launch, frame));
+      output.write(progressView(launch, frame));
       await delay(80);
     }
     if (failure) throw failure;
     if (!reply.ok) throw new Error(reply.error);
     launch = reply.launch;
-    output.write(progressView(workflow, launch, frame));
+    output.write(progressView(launch, frame));
     if (launch.status === "failed") throw new Error(launch.error || "workflow launch failed");
     if (launch.status === "started") { await delay(200); return; }
+    await delay(80);
   }
 }
 
 async function popup() {
   const pipeName = process.env.HERDR_CODEX_WORKFLOW_PIPE;
-  const workflow = process.env.HERDR_CODEX_WORKFLOW_KIND;
-  if (!pipeName || !workflow) throw new Error("popup was not launched by a workflow controller");
+  if (!pipeName) throw new Error("popup was not launched by a workflow controller");
   const client = await connectPipe(pipeName);
-  let submitted = false;
   try {
-    let reply = await client.request({ type: "hello" });
+    let reply = await client.request({ type: "hello", role: "input" });
     if (!reply.ok) throw new Error(reply.error);
     output.write("\x1b[2J\x1b[H");
-    output.write(workflow === "issue" ? "Issue to pull request\n\n" : "Understand pull request\n\n");
-    output.write(`Repository: ${process.env.HERDR_CODEX_WORKFLOW_REPO}\n`);
-    output.write("Full GitHub links select their repository.\n");
-    output.write("Numbers and partial links stay in this repository.\n\n");
-    const value = await readPopupInput(workflow === "issue" ? "Issue URL, number, or short description: " : "Pull-request URL or number: ");
+    const value = await readPopupInput("Paste issue or PR below:");
     reply = await client.request(value === null ? { type: "cancel" } : { type: "input", value });
     if (!reply.ok) throw new Error(reply.error);
-    submitted = true;
-    if (value !== null) await showLaunchProgress(client, workflow);
   } finally {
-    if (submitted) client.socket.end();
-    else client.socket.destroy();
+    client.socket.end();
   }
+}
+
+async function progress() {
+  const pipeName = process.env.HERDR_CODEX_WORKFLOW_PIPE;
+  if (!pipeName) throw new Error("progress pane was not launched by a workflow controller");
+  const client = await connectPipe(pipeName);
+  try { await showLaunchProgress(client); }
+  finally { client.socket.end(); }
 }
 
 async function readPopupInput(promptText) {
@@ -638,7 +708,7 @@ async function readPopupInput(promptText) {
     rl.close();
     return value || null;
   }
-  output.write(`${promptText}\nEnter submits. Esc cancels.\n> `);
+  output.write(`${promptText}\n> `);
   readline.emitKeypressEvents(input);
   input.setRawMode(true);
   input.resume();
@@ -708,14 +778,16 @@ async function watcher(encodedPayload) {
 
 async function main() {
   const [mode, ...args] = process.argv.slice(2);
-  if (mode === "issue" || mode === "pr") return controller(mode);
+  if (mode === "start") return controller();
   if (mode === "popup") return popup();
+  if (mode === "progress") return progress();
   if (mode === "cleanup") return cleanup();
   if (mode === "watch") return watcher(args[0]);
-  throw new Error("expected issue, pr, popup, cleanup, or watch mode");
+  throw new Error("expected start, popup, progress, cleanup, or watch mode");
 }
 
-module.exports = { codexAgentStartArgs, openInputPopup, progressView, resolveRepository };
+module.exports = { canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup, openProgressPane,
+  progressView, resolveRepository, shouldRetryStalledPrompt, sourceDirectory, stalledPromptRecovery, stalledPromptRetryArgs };
 
 if (require.main === module) {
   main().catch((error) => {

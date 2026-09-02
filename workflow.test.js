@@ -4,7 +4,11 @@ const assert = require("node:assert/strict");
 const net = require("node:net");
 const path = require("node:path");
 const test = require("node:test");
-const { codexAgentStartArgs, openInputPopup, progressView, resolveRepository } = require("./controller.js");
+const {
+  canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup,
+  openProgressPane, progressView, resolveRepository, shouldRetryStalledPrompt,
+  sourceDirectory, stalledPromptRecovery, stalledPromptRetryArgs,
+} = require("./controller.js");
 const {
   Lifecycle,
   collisionReason,
@@ -16,27 +20,33 @@ const {
 } = require("./workflow.js");
 
 test("full links select their repository while shorthand stays current", () => {
-  assert.deepEqual(parseTarget("issue", "#42", "owner/repo"), {
-    type: "issue", number: 42, input: "#42", repo: "owner/repo", repositorySource: "current",
+  assert.deepEqual(parseTarget("#42", "owner/repo"), {
+    number: 42, input: "#42", repo: "owner/repo", repositorySource: "current",
   });
-  assert.deepEqual(parseTarget("issue", "github.com/other/repo/issues/42", "owner/repo"), {
-    type: "issue", number: 42, input: "github.com/other/repo/issues/42", repo: "owner/repo", repositorySource: "current",
+  assert.deepEqual(parseTarget("github.com/other/repo/issues/42", "owner/repo"), {
+    number: 42, input: "github.com/other/repo/issues/42", repo: "owner/repo", repositorySource: "current",
   });
-  assert.deepEqual(parseTarget("pr", "pull/7", "owner/repo"), {
-    type: "pr", number: 7, input: "pull/7", repo: "owner/repo", repositorySource: "current",
+  assert.deepEqual(parseTarget("pull/7", "owner/repo"), {
+    number: 7, input: "pull/7", repo: "owner/repo", repositorySource: "current",
   });
-  assert.equal(parseTarget("pr", "https://github.com/Other/Repo/pull/7/files", "owner/repo").repo, "other/repo");
-  assert.deepEqual(parseTarget("issue", "fix the startup race", "owner/repo"), {
-    type: "description", input: "fix the startup race", description: "fix the startup race", repo: "owner/repo", repositorySource: "current",
+  assert.equal(parseTarget("https://github.com/Other/Repo/pull/7/files", "owner/repo").repo, "other/repo");
+  assert.deepEqual(parseTarget("https://github.com/Other/Repo/issues/42?notification=1", "owner/repo"), {
+    number: 42, input: "https://github.com/Other/Repo/issues/42?notification=1", repo: "other/repo", repositorySource: "link",
   });
-  assert.deepEqual(parseTarget("issue", "https://github.com/Other/Repo/issues/42?notification=1", "owner/repo"), {
-    type: "issue", number: 42, input: "https://github.com/Other/Repo/issues/42?notification=1",
-    url: "https://github.com/other/repo/issues/42", repo: "other/repo", repositorySource: "link",
+  assert.throws(() => parseTarget("fix the startup race", "owner/repo"), /URL or number/);
+  assert.throws(() => parseTarget("#0", "owner/repo"), /positive safe integer/);
+  assert.throws(() => parseTarget("https://github.com/owner/repo/issues/0", "owner/repo"), /positive safe integer/);
+});
+
+test("GitHub issue objects select the workflow and canonical URL", () => {
+  const target = parseTarget("#42", "owner/repo");
+  assert.deepEqual(completeGitHubTarget(target, { number: 42, html_url: "https://github.com/owner/repo/issues/42" }), {
+    ...target, type: "issue", url: "https://github.com/owner/repo/issues/42",
   });
-  assert.throws(() => parseTarget("issue", "pull/42", "owner/repo"), /expected a GitHub issue/);
-  assert.throws(() => parseTarget("pr", "describe a PR", "owner/repo"), /URL or number/);
-  assert.throws(() => parseTarget("issue", "#0", "owner/repo"), /positive safe integer/);
-  assert.throws(() => parseTarget("issue", "https://github.com/owner/repo/issues/0", "owner/repo"), /positive safe integer/);
+  assert.equal(completeGitHubTarget(target, {
+    number: 42, html_url: "https://github.com/owner/repo/pull/42", pull_request: {},
+  }).type, "pr");
+  assert.throws(() => completeGitHubTarget(target, { number: 41 }), /requested issue or pull request/);
 });
 
 test("resolves repositories by full owner and name identity", () => {
@@ -66,13 +76,14 @@ test("resolves repositories by full owner and name identity", () => {
 });
 
 test("renders repository provenance and launch checkpoints", () => {
-  const loading = progressView("pr", { status: "running", step: 0, repo: "owner/repo", repositorySource: "current" }, 0);
+  const loading = progressView({ status: "running", step: 0, repo: "owner/repo", repositorySource: "current" }, 0);
   assert.match(loading, /owner\/repo \(current workspace\)/);
-  assert.match(loading, /\[\|\] Resolve repository/);
+  assert.match(loading, /\| Resolve repository/);
   assert.match(loading, /0%/);
-  const started = progressView("issue", { status: "started", step: 4, repo: "other/repo", repositorySource: "link" });
+  assert.equal(loading.trim().split("\n").length, 2);
+  const started = progressView({ status: "started", step: 4, repo: "other/repo", repositorySource: "link" });
   assert.match(started, /other\/repo \(full link\)/);
-  assert.equal((started.match(/\[x\]/g) || []).length, 4);
+  assert.match(started, /Codex started/);
   assert.match(started, /100%/);
 });
 
@@ -84,11 +95,53 @@ test("normalizes common GitHub origin forms", () => {
 
 test("opens popup on Herdr's active pane without rejected target flags", () => {
   let args;
-  openInputPopup("pipe-1", "pr", "owner/repo", (value) => { args = value; });
+  openInputPopup("pipe-1", (value) => { args = value; });
   assert.equal(args.includes("--workspace"), false);
   assert.equal(args.includes("--target-pane"), false);
   assert.equal(args[args.indexOf("--cwd") + 1], __dirname);
   assert.equal(args.at(-1), "--focus");
+});
+
+test("shorthand follows the focused pane repository", () => {
+  assert.equal(sourceDirectory({
+    focused_pane_cwd: "C:\\Code\\plugin",
+    worktree: { repo_root: "C:\\Users\\jonat\\.codex" },
+    workspace_cwd: "C:\\Users\\jonat\\.codex",
+  }), "C:\\Code\\plugin");
+  assert.equal(canonicalRepositoryRoot(
+    "C:\\Code\\.worktrees\\plugin\\review-pr-1", "C:\\Code\\plugin\\.git",
+  ), "C:\\Code\\plugin");
+  assert.equal(canonicalRepositoryRoot("C:\\Code\\plugin", ".git"), "C:\\Code\\plugin");
+  assert.equal(canonicalRepositoryRoot(
+    "C:\\Code\\parent\\submodule", "C:\\Code\\parent\\.git\\modules\\submodule",
+  ), "C:\\Code\\parent\\submodule");
+});
+
+test("opens a slim unfocused progress split under the invoking pane", () => {
+  let openArgs, resizeArgs;
+  openProgressPane("pipe-1", { focused_pane_id: "w1:p2" }, (value) => {
+    openArgs = value;
+  }, (value) => { resizeArgs = value; });
+  assert.deepEqual(openArgs.slice(openArgs.indexOf("--placement"), openArgs.indexOf("--cwd")), [
+    "--placement", "split", "--target-pane", "w1:p2", "--direction", "down",
+  ]);
+  assert.equal(openArgs.at(-1), "--no-focus");
+  assert.deepEqual(resizeArgs, ["pane", "resize", "--pane", "w1:p2", "--direction", "down", "--amount", "0.4"]);
+});
+
+test("progress can observe launch status after input submits", async () => {
+  const lifecycle = new Lifecycle(), runtime = { launch: { status: "collecting", step: 0 } };
+  let submitted, hello = false, progressHello = false;
+  const protocol = controllerProtocol(runtime, lifecycle, () => { hello = true; }, (value) => { submitted = value; }, () => { progressHello = true; });
+  const inputConnection = {}, progressConnection = {};
+  await protocol.message({ type: "hello", role: "input" }, inputConnection);
+  await protocol.message({ type: "input", value: "#42" }, inputConnection);
+  runtime.launch.status = "running";
+  await protocol.message({ type: "hello", role: "progress" }, progressConnection);
+  assert.equal(hello, true);
+  assert.equal(progressHello, true);
+  assert.equal(submitted, "#42");
+  assert.equal((await protocol.message({ type: "status" }, progressConnection)).launch.status, "running");
 });
 
 test("forwards Codex++ auto-account only when the executable advertises it", () => {
@@ -99,6 +152,16 @@ test("forwards Codex++ auto-account only when the executable advertises it", () 
   assert.deepEqual(codexAgentStartArgs("worker", "w1:p2", () => "  --version  Print version"), base);
   assert.deepEqual(codexAgentStartArgs("worker", "w1:p2", () => "  --auto-accounting  Not the capability"), base);
   assert.deepEqual(codexAgentStartArgs("worker", "w1:p2", () => { throw new Error("probe failed"); }), base);
+  assert.equal(shouldRetryStalledPrompt('{"error":{"code":"agent_prompt_stalled"}}'), true);
+  assert.equal(shouldRetryStalledPrompt('{"error":{"code":"timeout"}}'), false);
+  assert.deepEqual(stalledPromptRetryArgs("worker", "workflow prompt"), [
+    "agent", "prompt", "worker", "\n\nworkflow prompt", "--wait", "--until", "working", "--until", "blocked", "--timeout", "5000",
+  ]);
+  assert.equal(stalledPromptRecovery("idle"), "retry");
+  assert.equal(stalledPromptRecovery("done"), "retry");
+  assert.equal(stalledPromptRecovery("working"), "started");
+  assert.equal(stalledPromptRecovery("blocked"), "started");
+  assert.equal(stalledPromptRecovery("unknown"), "failed");
 });
 
 test("refuses local, path, Git worktree, and Herdr collisions", () => {
