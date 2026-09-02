@@ -42,9 +42,10 @@ Then run `herdr server reload-config`.
 
 `issue-to-pr` accepts a complete issue or pull-request URL, partial link, or
 number. A complete GitHub URL selects its repository; the other forms use the
-current repository. Use Tab or Right/Down to add optional custom instructions,
-then press Enter to start. Long pasted text stays on one line and scrolls to its
-end. GitHub identifies whether the number is an issue or
+current repository. Use Tab or Right/Down to add optional custom instructions.
+Enter starts the workflow; Shift+Enter adds an instruction line. Long target
+text scrolls horizontally, while instructions wrap and scroll vertically.
+GitHub identifies whether the number is an issue or
 pull request. Issue workflows pin the fetched default-branch SHA and start one Codex
 parent that owns implementation, review, CI, and an open pull request. Review
 workflows check out the exact pull-request head SHA and start a read-only review.

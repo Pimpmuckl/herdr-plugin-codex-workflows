@@ -103,24 +103,26 @@ test("opens popup on Herdr's active pane without rejected target flags", () => {
   assert.equal(args.at(-1), "--focus");
 });
 
-test("popup keeps custom instructions separate from the GitHub target", () => {
+test("popup edits and renders multiline custom instructions", () => {
   const state = { active: 0, values: ["", ""] };
   popupInputKey(state, "#42", {});
   assert.match(popupInputView(state, 40), /\x1b\[1;\d+H$/);
   popupInputKey(state, "", { name: "down" });
   popupInputKey(state, "focus startup", {});
-  assert.deepEqual(state, { active: 1, values: ["#42", "focus startup"] });
-  assert.match(popupInputView(state, 40), /─+\n> Custom instructions: focus startup\x1b\[3;\d+H$/);
+  assert.equal(popupInputKey(state, "\x1b[13;2u", { name: "undefined" }), "render");
+  popupInputKey(state, "then test", {});
+  assert.deepEqual(state, { active: 1, values: ["#42", "focus startup\nthen test"] });
+  assert.match(popupInputView(state, 40, 6), /─+\n> Custom instructions:\n  focus startup\n  then test\x1b\[5;\d+H$/);
   assert.equal(popupInputKey(state, "", { name: "return" }), "submit");
 
   state.values[1] = "x".repeat(100);
-  const long = popupInputView(state, 40).replace(/^\x1b\[2J\x1b\[H/, "").replace(/\x1b\[3;\d+H$/, "");
-  assert.equal(long.split("\n").length, 3);
+  const long = popupInputView(state, 40, 6).replace(/^\x1b\[2J\x1b\[H/, "").replace(/\x1b\[6;\d+H$/, "");
+  assert.equal(long.split("\n").length, 6);
   assert.ok(long.split("\n").every((line) => [...line].length < 40));
 
-  const input = { repo: "owner/repo", target: { input: "#42" }, instructions: "focus startup" };
-  assert.match(issuePrompt(input), /Additional user instructions \(task context\): "focus startup"/);
-  assert.match(prPrompt(input), /Additional user instructions \(task context\): "focus startup"/);
+  const promptInput = { repo: "owner/repo", target: { input: "#42" }, instructions: "focus startup\nthen test" };
+  assert.match(issuePrompt(promptInput), /Additional user instructions \(task context\): "focus startup\\nthen test"/);
+  assert.match(prPrompt(promptInput), /Additional user instructions \(task context\): "focus startup\\nthen test"/);
 });
 
 test("shorthand follows the focused pane repository", () => {
@@ -156,12 +158,12 @@ test("progress can observe launch status after input submits", async () => {
   const protocol = controllerProtocol(runtime, lifecycle, () => { hello = true; }, (value) => { submitted = value; }, () => { progressHello = true; });
   const inputConnection = {}, progressConnection = {};
   await protocol.message({ type: "hello", role: "input" }, inputConnection);
-  await protocol.message({ type: "input", target: "#42", instructions: "focus startup" }, inputConnection);
+  await protocol.message({ type: "input", target: "#42", instructions: "focus startup\r\nthen test" }, inputConnection);
   runtime.launch.status = "running";
   await protocol.message({ type: "hello", role: "progress" }, progressConnection);
   assert.equal(hello, true);
   assert.equal(progressHello, true);
-  assert.deepEqual(submitted, { target: "#42", instructions: "focus startup" });
+  assert.deepEqual(submitted, { target: "#42", instructions: "focus startup\nthen test" });
   assert.equal((await protocol.message({ type: "status" }, progressConnection)).launch.status, "running");
 });
 

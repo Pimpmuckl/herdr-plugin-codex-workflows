@@ -576,7 +576,7 @@ function controllerProtocol(runtime, lifecycle, resolveHello, resolveInput, reso
         if (lifecycle.state !== "COLLECTING") throw new Error("input was already submitted");
         lifecycle.transition(message.type === "input" ? "submit" : "cancel");
         resolveInput(message.type === "input" ? {
-          target: compact(message.target), instructions: compact(message.instructions),
+          target: compact(message.target), instructions: String(message.instructions || "").replace(/\r\n?/g, "\n").trim(),
         } : null);
         return {};
       }
@@ -740,25 +740,32 @@ async function progress() {
   finally { client.socket.end(); }
 }
 
-function popupInputView(state, width = output.columns || 80) {
-  const field = (index, label) => {
-    const prefix = `${state.active === index ? ">" : " "} ${label}: `;
-    const room = Math.max(1, width - prefix.length - 1);
-    return prefix + [...state.values[index]].slice(-room).join("");
-  };
-  const rows = [field(0, "Paste issue or PR"), "─".repeat(Math.max(1, width - 1)), field(1, "Custom instructions")];
-  const cursorRow = state.active === 0 ? 1 : 3;
+function popupInputView(state, width = output.columns || 80, height = output.rows || 10) {
+  const targetPrefix = `${state.active === 0 ? ">" : " "} Paste issue or PR: `;
+  const target = targetPrefix + [...state.values[0]].slice(-Math.max(1, width - targetPrefix.length - 1)).join("");
+  const instructionWidth = Math.max(1, width - 3);
+  const wrapped = state.values[1].split("\n").flatMap((line) => {
+    const chars = [...line], lines = [];
+    do lines.push(chars.splice(0, instructionWidth).join("")); while (chars.length);
+    return lines;
+  });
+  const instructions = wrapped.slice(-Math.max(1, height - 3));
+  const rows = [target, "─".repeat(Math.max(1, width - 1)), `${state.active === 1 ? ">" : " "} Custom instructions:`, ...instructions.map((line) => `  ${line}`)];
+  const cursorRow = state.active === 0 ? 1 : rows.length;
   return `\x1b[2J\x1b[H${rows.join("\n")}\x1b[${cursorRow};${[...rows[cursorRow - 1]].length + 1}H`;
 }
 
 function popupInputKey(state, sequence, key) {
   if (key.name === "escape" || (key.ctrl && key.name === "c")) return "cancel";
-  if (["return", "enter"].includes(key.name)) return state.values[0].trim() ? "submit" : null;
+  if (["return", "enter"].includes(key.name) || sequence === "\x1b[13;2u") {
+    if (state.active === 1 && (key.shift || sequence === "\x1b[13;2u")) { state.values[1] += "\n"; return "render"; }
+    return state.values[0].trim() ? "submit" : null;
+  }
   if (key.name === "tab") state.active = 1 - state.active;
   else if (["right", "down"].includes(key.name)) state.active = 1;
   else if (["left", "up"].includes(key.name)) state.active = 0;
   else if (key.name === "backspace") state.values[state.active] = [...state.values[state.active]].slice(0, -1).join("");
-  else if (sequence && !key.ctrl && !key.meta && !sequence.startsWith("\x1b")) state.values[state.active] += sequence.replace(/[\r\n\t]+/g, " ");
+  else if (sequence && !key.ctrl && !key.meta && !sequence.startsWith("\x1b")) state.values[state.active] += sequence.replace(/\r\n?/g, "\n").replace(/\t/g, "  ");
   else return null;
   return "render";
 }
@@ -772,7 +779,7 @@ async function readPopupInput() {
     return target ? { target, instructions } : null;
   }
   const state = { active: 0, values: ["", ""] };
-  output.write(popupInputView(state));
+  output.write(`\x1b[>1u${popupInputView(state)}`);
   readline.emitKeypressEvents(input);
   input.setRawMode(true);
   input.resume();
@@ -787,7 +794,7 @@ async function readPopupInput() {
     function onKey(sequence, key) {
       const action = popupInputKey(state, sequence, key);
       if (action === "cancel") return finish(null);
-      if (action === "submit") return finish({ target: compact(state.values[0]), instructions: compact(state.values[1]) });
+      if (action === "submit") return finish({ target: compact(state.values[0]), instructions: state.values[1].trim() });
       if (action === "render") output.write(popupInputView(state));
     }
     input.on("keypress", onKey);
