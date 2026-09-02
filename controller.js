@@ -314,8 +314,8 @@ async function startParent(runtime, prompt) {
     if (code !== 0 && shouldRetryStalledPrompt(stderr)) {
       try {
         const agent = getAgent(runtime.identity.agentName);
-        if (agent?.agent_status === "idle") runHerdr(stalledPromptRetryArgs(runtime.identity.agentName));
-        else if (!agent || !["working", "blocked", "done"].includes(agent.agent_status)) {
+        if (["idle", "done"].includes(agent?.agent_status)) runHerdr(stalledPromptRetryArgs(runtime.identity.agentName));
+        else if (!agent || !["working", "blocked"].includes(agent.agent_status)) {
           throw new Error(compact(stderr) || "agent prompt stalled outside a recoverable state");
         }
       } catch (error) {
