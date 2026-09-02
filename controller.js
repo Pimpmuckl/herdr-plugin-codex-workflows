@@ -79,8 +79,14 @@ function shouldRetryStalledPrompt(stderr) {
   return /"code"\s*:\s*"agent_prompt_stalled"/.test(stderr);
 }
 
-function stalledPromptRetryArgs(agentName) {
-  return ["agent", "prompt", agentName, " ", "--wait", "--until", "working", "--until", "blocked", "--timeout", "5000"];
+function stalledPromptRecovery(status) {
+  if (["idle", "done"].includes(status)) return "retry";
+  if (["working", "blocked"].includes(status)) return "started";
+  return "failed";
+}
+
+function stalledPromptRetryArgs(agentName, prompt) {
+  return ["agent", "prompt", agentName, `\n\n${prompt}`, "--wait", "--until", "working", "--until", "blocked", "--timeout", "5000"];
 }
 
 function git(cwd, args) {
@@ -314,8 +320,9 @@ async function startParent(runtime, prompt) {
     if (code !== 0 && shouldRetryStalledPrompt(stderr)) {
       try {
         const agent = getAgent(runtime.identity.agentName);
-        if (["idle", "done"].includes(agent?.agent_status)) runHerdr(stalledPromptRetryArgs(runtime.identity.agentName));
-        else if (!agent || !["working", "blocked"].includes(agent.agent_status)) {
+        const recovery = stalledPromptRecovery(agent?.agent_status);
+        if (recovery === "retry") runHerdr(stalledPromptRetryArgs(runtime.identity.agentName, prompt));
+        else if (recovery === "failed") {
           throw new Error(compact(stderr) || "agent prompt stalled outside a recoverable state");
         }
       } catch (error) {
@@ -779,7 +786,7 @@ async function main() {
 }
 
 module.exports = { canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup, openProgressPane,
-  progressView, resolveRepository, shouldRetryStalledPrompt, sourceDirectory, stalledPromptRetryArgs };
+  progressView, resolveRepository, shouldRetryStalledPrompt, sourceDirectory, stalledPromptRecovery, stalledPromptRetryArgs };
 
 if (require.main === module) {
   main().catch((error) => {

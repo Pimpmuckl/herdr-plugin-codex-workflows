@@ -7,7 +7,7 @@ const test = require("node:test");
 const {
   canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup,
   openProgressPane, progressView, resolveRepository, shouldRetryStalledPrompt,
-  sourceDirectory, stalledPromptRetryArgs,
+  sourceDirectory, stalledPromptRecovery, stalledPromptRetryArgs,
 } = require("./controller.js");
 const {
   Lifecycle,
@@ -151,9 +151,14 @@ test("forwards Codex++ auto-account only when the executable advertises it", () 
   assert.deepEqual(codexAgentStartArgs("worker", "w1:p2", () => { throw new Error("probe failed"); }), base);
   assert.equal(shouldRetryStalledPrompt('{"error":{"code":"agent_prompt_stalled"}}'), true);
   assert.equal(shouldRetryStalledPrompt('{"error":{"code":"timeout"}}'), false);
-  assert.deepEqual(stalledPromptRetryArgs("worker"), [
-    "agent", "prompt", "worker", " ", "--wait", "--until", "working", "--until", "blocked", "--timeout", "5000",
+  assert.deepEqual(stalledPromptRetryArgs("worker", "workflow prompt"), [
+    "agent", "prompt", "worker", "\n\nworkflow prompt", "--wait", "--until", "working", "--until", "blocked", "--timeout", "5000",
   ]);
+  assert.equal(stalledPromptRecovery("idle"), "retry");
+  assert.equal(stalledPromptRecovery("done"), "retry");
+  assert.equal(stalledPromptRecovery("working"), "started");
+  assert.equal(stalledPromptRecovery("blocked"), "started");
+  assert.equal(stalledPromptRecovery("unknown"), "failed");
 });
 
 test("refuses local, path, Git worktree, and Herdr collisions", () => {
