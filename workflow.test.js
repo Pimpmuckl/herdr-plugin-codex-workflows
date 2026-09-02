@@ -6,8 +6,8 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup,
-  openProgressPane, progressView, resolveRepository, shouldRetryStalledPrompt,
-  sourceDirectory, stalledPromptRecovery, stalledPromptRetryArgs,
+  isAgentPromptStalled, openProgressPane, progressView, resolveRepository,
+  sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands,
 } = require("./controller.js");
 const {
   Lifecycle,
@@ -152,15 +152,20 @@ test("forwards Codex++ auto-account only when the executable advertises it", () 
   assert.deepEqual(codexAgentStartArgs("worker", "w1:p2", () => "  --version  Print version"), base);
   assert.deepEqual(codexAgentStartArgs("worker", "w1:p2", () => "  --auto-accounting  Not the capability"), base);
   assert.deepEqual(codexAgentStartArgs("worker", "w1:p2", () => { throw new Error("probe failed"); }), base);
-  assert.equal(shouldRetryStalledPrompt('{"error":{"code":"agent_prompt_stalled"}}'), true);
-  assert.equal(shouldRetryStalledPrompt('{"error":{"code":"timeout"}}'), false);
-  assert.deepEqual(stalledPromptRetryArgs("worker", "workflow prompt"), [
-    "agent", "prompt", "worker", "\n\nworkflow prompt", "--wait", "--until", "working", "--until", "blocked", "--timeout", "5000",
+});
+
+test("stalled prompts submit the pasted composer without repeating the prompt", () => {
+  assert.equal(isAgentPromptStalled('{"error":{"code":"agent_prompt_stalled"}}'), true);
+  assert.equal(isAgentPromptStalled('{"error":{"code":"timeout"}}'), false);
+  assert.deepEqual(stalledPromptRecoveryCommands("worker"), [
+    ["agent", "send-keys", "worker", "enter"],
+    ["agent", "wait", "worker", "--until", "working", "--until", "blocked", "--timeout", "5000"],
   ]);
-  assert.equal(stalledPromptRecovery("idle"), "retry");
-  assert.equal(stalledPromptRecovery("done"), "retry");
+  assert.equal(stalledPromptRecovery("idle"), "submit");
+  assert.equal(stalledPromptRecovery("done"), "submit");
   assert.equal(stalledPromptRecovery("working"), "started");
   assert.equal(stalledPromptRecovery("blocked"), "started");
+  assert.equal(stalledPromptRecovery(), "failed");
   assert.equal(stalledPromptRecovery("unknown"), "failed");
 });
 

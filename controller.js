@@ -75,18 +75,21 @@ function codexAgentStartArgs(agentName, paneId, readHelp = () => runCanonicalCod
   return args;
 }
 
-function shouldRetryStalledPrompt(stderr) {
+function isAgentPromptStalled(stderr) {
   return /"code"\s*:\s*"agent_prompt_stalled"/.test(stderr);
 }
 
 function stalledPromptRecovery(status) {
-  if (["idle", "done"].includes(status)) return "retry";
+  if (["idle", "done"].includes(status)) return "submit";
   if (["working", "blocked"].includes(status)) return "started";
   return "failed";
 }
 
-function stalledPromptRetryArgs(agentName, prompt) {
-  return ["agent", "prompt", agentName, `\n\n${prompt}`, "--wait", "--until", "working", "--until", "blocked", "--timeout", "5000"];
+function stalledPromptRecoveryCommands(agentName) {
+  return [
+    ["agent", "send-keys", agentName, "enter"],
+    ["agent", "wait", agentName, "--until", "working", "--until", "blocked", "--timeout", "5000"],
+  ];
 }
 
 function git(cwd, args) {
@@ -318,11 +321,13 @@ async function startParent(runtime, prompt) {
   child.stderr.on("data", (chunk) => { stderr += chunk; });
   child.once("error", (error) => { runtime.prompt.error = error; });
   child.once("close", (code) => {
-    if (code !== 0 && shouldRetryStalledPrompt(stderr)) {
+    if (code !== 0 && isAgentPromptStalled(stderr)) {
       try {
         const agent = getAgent(runtime.identity.agentName);
         const recovery = stalledPromptRecovery(agent?.agent_status);
-        if (recovery === "retry") runHerdr(stalledPromptRetryArgs(runtime.identity.agentName, prompt));
+        if (recovery === "submit") {
+          for (const args of stalledPromptRecoveryCommands(runtime.identity.agentName)) runHerdr(args);
+        }
         else if (recovery === "failed") {
           throw new Error(compact(stderr) || "agent prompt stalled outside a recoverable state");
         }
@@ -787,7 +792,7 @@ async function main() {
 }
 
 module.exports = { canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup, openProgressPane,
-  progressView, resolveRepository, shouldRetryStalledPrompt, sourceDirectory, stalledPromptRecovery, stalledPromptRetryArgs };
+  isAgentPromptStalled, progressView, resolveRepository, sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands };
 
 if (require.main === module) {
   main().catch((error) => {
