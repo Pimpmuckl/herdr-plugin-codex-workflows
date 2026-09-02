@@ -67,7 +67,8 @@ Each action invocation has its own controller process and Windows named pipe
 for its popup. Its state is only in memory: `COLLECTING -> PROVISIONING ->
 RUNNING ->` a terminal result. Concurrent invocations do not share a queue or
 registry. The controller uses Herdr's native `agent start` and `agent prompt`
-lifecycle without injecting Codex command-line configuration.
+lifecycle. When Codex advertises `--auto-account`, the controller forwards that
+startup option through Herdr; otherwise the launch is unchanged.
 
 After a successful workflow, the controller exits the owning Codex process,
 releases its Herdr command slot, and leaves the exact session ready to archive.

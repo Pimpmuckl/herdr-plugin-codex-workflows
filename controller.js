@@ -63,6 +63,14 @@ function runCodex(args) {
   return codexBin ? execute(codexBin, args) : execute(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "codex", ...args]);
 }
 
+function codexAgentStartArgs(agentName, paneId, readHelp = () => runCodex(["--help"])) {
+  const args = ["agent", "start", agentName, "--kind", "codex", "--pane", paneId];
+  try {
+    if (/(?:^|\s)--auto-account(?=\s|$)/m.test(readHelp())) args.push("--", "--auto-account");
+  } catch {}
+  return args;
+}
+
 function git(cwd, args) {
   return execute(gitBin, ["-C", cwd, ...args]);
 }
@@ -267,7 +275,7 @@ async function waitForShell(paneId, cwd) {
 async function startParent(runtime, prompt) {
   const paneId = runtime.worktree.root_pane.pane_id;
   await waitForShell(paneId);
-  runHerdr(["agent", "start", runtime.identity.agentName, "--kind", "codex", "--pane", paneId]);
+  runHerdr(codexAgentStartArgs(runtime.identity.agentName, paneId));
   const child = spawn(herdr, ["agent", "prompt", runtime.identity.agentName, prompt, "--wait"], {
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -703,7 +711,7 @@ async function main() {
   throw new Error("expected issue, pr, popup, cleanup, or watch mode");
 }
 
-module.exports = { openInputPopup, progressView, resolveRepository };
+module.exports = { codexAgentStartArgs, openInputPopup, progressView, resolveRepository };
 
 if (require.main === module) {
   main().catch((error) => {
