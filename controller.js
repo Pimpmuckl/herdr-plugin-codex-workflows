@@ -28,7 +28,7 @@ function readJson(value, fallback = null) {
   }
 }
 function execute(command, args) {
-  const result = spawnSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024 });
+  const result = spawnSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
   if (result.error || result.status !== 0) {
     const detail = compact(result.stderr) || compact(result.stdout) || result.error?.message || `exit ${result.status}`;
     const error = new Error(`${command} ${args.join(" ")} failed: ${detail}`);
@@ -47,7 +47,7 @@ function isImplementationWorkflow(workflow) {
   return workflow !== "pr";
 }
 function succeeds(command, args) {
-  const result = spawnSync(command, args, { stdio: "ignore" });
+  const result = spawnSync(command, args, { stdio: "ignore", windowsHide: true });
   return !result.error && result.status === 0;
 }
 function runJson(command, args) {
@@ -320,7 +320,7 @@ async function startParent(runtime, prompt) {
   await waitForShell(paneId);
   runHerdr(codexAgentStartArgs(runtime.identity.agentName, paneId));
   const child = spawn(herdr, ["agent", "prompt", runtime.identity.agentName, prompt, "--wait"], {
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
   });
   runtime.prompt = { child, finished: false, error: null };
   let stderr = "";
