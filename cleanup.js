@@ -79,7 +79,7 @@ function classifyPullRequest(value) {
   return "retry";
 }
 
-function assertLocalIdentity(payload, snapshot, automatic, allowOwner = false) {
+function assertLocalIdentity(payload, snapshot, allowOwner = false) {
   const workspace = snapshot.workspace;
   if (!workspace) return false;
   const worktree = workspace.worktree, tokens = workspace.tokens || {};
@@ -88,8 +88,7 @@ function assertLocalIdentity(payload, snapshot, automatic, allowOwner = false) {
     || normalizePath(worktree.repo_root) !== normalizePath(payload.repoRoot)) throw new CleanupStop("workspace identity changed");
   if (!TERMINAL_STATES.has(tokens.workflow_state) || tokens.workflow_kind !== payload.workflow || tokens.workflow_controller !== "inactive"
     || tokens.workflow_branch !== payload.branch || tokens.workflow_root_pane !== payload.rootPaneId
-    || String(tokens.workflow_session || "").toLowerCase() !== payload.sessionId.toLowerCase()
-    || (automatic && (tokens.workflow_state !== "complete" || tokens.workflow_cleanup !== "waiting"))) {
+    || String(tokens.workflow_session || "").toLowerCase() !== payload.sessionId.toLowerCase()) {
     throw new CleanupStop("workflow cleanup metadata changed");
   }
   const rootAgents = snapshot.agents.filter((agent) => agent.workspace_id === payload.workspaceId && agent.pane_id === payload.rootPaneId);
@@ -123,9 +122,9 @@ async function snapshot(payload, ops) {
   };
 }
 
-async function preflight(payload, ops, automatic = true, allowOwner = false) {
+async function preflight(payload, ops, allowOwner = false) {
   payload = validatePayload(payload);
-  return assertLocalIdentity(payload, await snapshot(payload, ops), automatic, allowOwner);
+  return assertLocalIdentity(payload, await snapshot(payload, ops), allowOwner);
 }
 
 async function withCleanupClaim(payload, callback) {
@@ -146,25 +145,19 @@ async function withCleanupClaim(payload, callback) {
   finally { await new Promise((resolve) => server.close(resolve)); }
 }
 
-async function cleanupTransaction(payload, ops, automatic = true, claimed = false) {
+async function cleanupTransaction(payload, ops, claimed = false) {
   payload = validatePayload(payload);
-  if (!claimed) return withCleanupClaim(payload, () => cleanupTransaction(payload, ops, automatic, true));
-  if (automatic && payload.prNumber === null) return { status: "stopped", reason: "cleanup watcher has no pull request" };
-  if (automatic) {
-    try {
-      if (classifyPullRequest(await ops.pullRequest(payload.repo, payload.prNumber)) !== "merged") return { status: "retry" };
-    } catch { return { status: "retry" }; }
-  }
+  if (!claimed) return withCleanupClaim(payload, () => cleanupTransaction(payload, ops, true));
   try {
-    if (!await preflight(payload, ops, automatic, true)) return { status: "missing" };
+    if (!await preflight(payload, ops, true)) return { status: "missing" };
   } catch (error) {
-    if (automatic && error.retryable) return { status: "retry" };
+    if (error.retryable) return { status: "retry", reason: safeReason(error, "Owning Codex session is still active.") };
     return { status: "stopped", reason: safeReason(error, "Cleanup preflight failed; the workspace was retained.") };
   }
   try {
     await ops.release(payload.workspaceId, payload.rootPaneId, payload.sessionId, payload.worktreePath);
   } catch (error) {
-    if (automatic && error.retryable) return { status: "retry" };
+    if (error.retryable) return { status: "retry", reason: safeReason(error, "Owning Codex session is still active.") };
     return { status: "stopped", reason: "Codex session release failed; the workspace and worktree were retained." };
   }
   try {
@@ -174,7 +167,7 @@ async function cleanupTransaction(payload, ops, automatic = true, claimed = fals
   }
   try {
     const after = await snapshot(payload, ops);
-    if (!assertLocalIdentity(payload, after, automatic, false)) throw new CleanupStop("workspace disappeared after session archive");
+    if (!assertLocalIdentity(payload, after, false)) throw new CleanupStop("workspace disappeared after session archive");
   } catch (error) {
     return { status: "partial", reason: safeReason(error, "Post-archive validation failed; the worktree was retained.") };
   }
@@ -212,7 +205,7 @@ async function watch(payload, ops, interval = 60000) {
   payload = validatePayload(payload);
   if (payload.prNumber === null) throw new Error("cleanup watcher has no pull request");
   try {
-    if (!await preflight(payload, ops, true, true)) return "superseded";
+    if (!await preflight(payload, ops, true)) return "superseded";
   } catch (error) {
     if (!error.retryable) {
       await ops.project("stopped"); await ops.notify("Codex workflow cleanup stopped", safeReason(error, "Cleanup preflight failed; the workspace was retained."));
@@ -229,7 +222,7 @@ async function watch(payload, ops, interval = 60000) {
     catch { state = "retry"; }
     if (state === "open" || state === "retry") { await ops.delay(interval); continue; }
     if (state === "closed") { await ops.project("retained"); await ops.notify("Codex workflow retained", "Pull request closed without merge; workspace and branch remain."); return "retained"; }
-    const result = await cleanupTransaction(payload, ops, true);
+    const result = await ops.cleanup();
     if (result.status === "busy") { await ops.delay(interval); continue; }
     if (result.status === "retry") { await ops.delay(interval); continue; }
     if (result.status === "missing") return "superseded";

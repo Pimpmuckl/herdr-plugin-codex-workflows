@@ -38,7 +38,7 @@ command = "pimpmuckl.codex-workflows.feature-to-pr"
 description = "feature or fix"
 
 [[keys.command]]
-key = "alt+shift+x"
+key = "alt+shift+d"
 type = "plugin_action"
 command = "pimpmuckl.codex-workflows.cleanup-current-workflow"
 description = "clean up Codex workflow"
@@ -77,16 +77,24 @@ An implementation workflow with no pull request remains active. When Codex becom
 or done, its workspace is marked waiting. A blocked Codex stays marked blocked
 for human input. In each case, Codex, the controller, worktree, and workspace
 stay available for follow-up. The controller checks again after follow-up
-activity settles. Once an implementation workflow has exactly one valid pull request,
-or a pull-request review completes, the controller leaves the Codex session and
-worktree available, starts the detached cleanup watcher, and exits.
+activity settles. Once an implementation workflow has exactly one valid pull
+request, or a pull-request review completes, the controller leaves the Codex
+session and worktree available and exits. Cleanup is manual by default.
 
-An open pull request keeps the agent and workspace intact. A closed, unmerged
-pull request also keeps them and stops the watcher. When GitHub reports an
-unambiguous merge, cleanup waits for the exact owning Codex agent to settle,
-quits it, archives its session, then rechecks the local identity and cleanliness
-and asks Herdr to remove the workspace and worktree without force. The workflow
-branch remains.
+To clean up automatically after the pull request merges, run
+`herdr plugin config-dir pimpmuckl.codex-workflows` and create `config.json` in
+that directory:
+
+```json
+{"auto-cleanup-on-pr-merge": true}
+```
+
+When enabled, a detached watcher waits for an unambiguous merge, then invokes
+the same current-workflow cleanup used by `Alt+Shift+D`. An open or closed,
+unmerged pull request keeps the agent and workspace intact. Cleanup waits for
+the exact owning Codex agent to settle, quits it, archives its session, then
+rechecks the local identity and cleanliness and asks Herdr to remove the
+workspace and worktree without force. The workflow branch remains.
 
 Failure and cancellation keep all workflow state. The
 `cleanup-current-workflow` action uses the same archive-first transaction for a

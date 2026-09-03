@@ -1,11 +1,13 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const {
-  canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup,
+  autoCleanupOnPrMerge, canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup,
   implementationPullRequest, isAgentPromptStalled, monitor, openProgressPane, popupInputKey, popupInputView, progressView, resolveRepository,
   sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands, waitForActivity,
 } = require("./controller.js");
@@ -20,6 +22,16 @@ const {
   parseGitHubRemote,
   parseTarget,
 } = require("./workflow.js");
+
+test("pull-request merge cleanup is opt-in", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-codex-workflows-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  assert.equal(autoCleanupOnPrMerge(directory), false);
+  fs.writeFileSync(path.join(directory, "config.json"), '{"auto-cleanup-on-pr-merge":false}');
+  assert.equal(autoCleanupOnPrMerge(directory), false);
+  fs.writeFileSync(path.join(directory, "config.json"), '{"auto-cleanup-on-pr-merge":true}');
+  assert.equal(autoCleanupOnPrMerge(directory), true);
+});
 
 test("full links select their repository while shorthand stays current", () => {
   assert.deepEqual(parseTarget("#42", "owner/repo"), {

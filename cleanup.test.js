@@ -21,20 +21,20 @@ function agent(overrides = {}) {
 
 function fixture(options = {}) {
   const calls = [];
-  let archived = false, mergeChecked = false, released = false;
+  let archived = false, released = false;
   const workspace = { workspace_id: "w9", tokens: {
     workflow_kind: "issue", workflow_state: "complete", workflow_controller: "inactive",
     workflow_branch: payload.branch, workflow_cleanup: "waiting",
     workflow_root_pane: payload.rootPaneId, workflow_session: payload.sessionId,
   }, worktree: { is_linked_worktree: true, checkout_path: payload.worktreePath, repo_root: payload.repoRoot } };
-  return { calls, ops: {
+  const ops = {
     async workspace() { calls.push("workspace"); return options.missing ? null : workspace; },
     async agents() {
       if (archived && options.postAgent) return [agent(options.postAgent)];
       if (released) return [];
       if (options.active) return [agent(), agent({ pane_id: "w9:p2", agent_status: "working" })];
       if (options.ownerWorking) return [agent({ agent_status: "working" })];
-      if (options.rootReplacement || (options.replacementAfterPull && mergeChecked)) {
+      if (options.rootReplacement) {
         return [agent({ agent_status: "working", agent_session: { source: "herdr:claude", kind: "id", value: "replacement" } })];
       }
       return options.noOwner ? [] : [agent()];
@@ -45,7 +45,7 @@ function fixture(options = {}) {
       if (args[0] === "status") return options.dirty || (archived && options.postDirty) || "";
       return `worktree ${payload.repoRoot}\nbranch refs/heads/master\n\nworktree ${payload.worktreePath}\nbranch refs/heads/${payload.branch}\n`;
     },
-    async pullRequest() { calls.push("pull"); mergeChecked = true; return options.pull || { state: "MERGED", mergedAt: "2026-09-01T00:00:00Z" }; },
+    async pullRequest() { calls.push("pull"); return options.pull || { state: "MERGED", mergedAt: "2026-09-01T00:00:00Z" }; },
     async release() {
       calls.push("release");
       if (options.ownerResumes) { const error = new Error("owner resumed"); error.retryable = true; throw error; }
@@ -57,7 +57,9 @@ function fixture(options = {}) {
     async project(state) { calls.push(`project:${state}`); },
     async notify(title) { calls.push(`notify:${title}`); },
     async delay() { calls.push("delay"); },
-  } };
+  };
+  ops.cleanup = async () => { calls.push("cleanup"); return cleanupTransaction(payload, ops); };
+  return { calls, ops };
 }
 
 test("captures exactly one idle root-pane Codex UUID", () => {
@@ -108,7 +110,7 @@ test("detached watcher arms before authorization and IPC release", async () => {
 });
 
 test("refuses concrete identity, dirty, and active-agent mismatches before archive", async () => {
-  for (const options of [{ branch: "other" }, { dirty: " M file" }, { active: true }, { rootReplacement: true }, { replacementAfterPull: true }]) {
+  for (const options of [{ branch: "other" }, { dirty: " M file" }, { active: true }, { rootReplacement: true }]) {
     const { calls, ops } = fixture(options);
     assert.equal((await cleanupTransaction(payload, ops)).status, "stopped");
     assert.equal(calls.includes("archive"), false);
@@ -117,18 +119,19 @@ test("refuses concrete identity, dirty, and active-agent mismatches before archi
 
 test("waits for the exact owning agent to become idle before cleanup", async () => {
   const { calls, ops } = fixture({ ownerWorking: true });
-  assert.equal((await cleanupTransaction(payload, ops)).status, "retry");
+  assert.deepEqual(await cleanupTransaction(payload, ops), { status: "retry", reason: "owning Codex session is still active" });
   assert.equal(calls.includes("release"), false);
   assert.equal(calls.includes("archive"), false);
   const resumed = fixture({ ownerResumes: true });
-  assert.equal((await cleanupTransaction(payload, resumed.ops)).status, "retry");
+  assert.deepEqual(await cleanupTransaction(payload, resumed.ops), { status: "retry", reason: "Owning Codex session is still active." });
   assert.equal(resumed.calls.includes("archive"), false);
 });
 
-test("archives, rechecks, then removes; manual cleanup uses the same transaction without GitHub", async () => {
-  const automatic = fixture();
-  assert.equal((await cleanupTransaction(payload, automatic.ops)).status, "removed");
-  assert.deepEqual(automatic.calls.filter((call) => ["workspace", "release", "archive", "remove"].includes(call)), ["workspace", "release", "archive", "workspace", "remove"]);
+test("cleanup archives, rechecks, then removes without querying GitHub", async () => {
+  const cleanup = fixture();
+  assert.equal((await cleanupTransaction(payload, cleanup.ops)).status, "removed");
+  assert.deepEqual(cleanup.calls.filter((call) => ["workspace", "release", "archive", "remove"].includes(call)), ["workspace", "release", "archive", "workspace", "remove"]);
+  assert.equal(cleanup.calls.includes("pull"), false);
   assert.equal((await cleanupTransaction(payload, fixture({ noOwner: true }).ops)).status, "removed");
   const manual = fixture();
   const manualData = await manual.ops.workspace();
@@ -136,13 +139,11 @@ test("archives, rechecks, then removes; manual cleanup uses the same transaction
   assert.throws(() => manualWorkspace({ ...manualData, tokens: { ...manualData.tokens, workflow_controller: "active", workflow_root_pane: payload.rootPaneId, workflow_session: payload.sessionId } }), /still active/);
   const manualIdentity = manualWorkspace({ ...manualData, tokens: { ...manualData.tokens, workflow_root_pane: payload.rootPaneId, workflow_session: payload.sessionId } });
   assert.equal(manualIdentity.tokens.workflow_session, payload.sessionId);
-  assert.equal((await cleanupTransaction({ ...payload, prNumber: null }, manual.ops, false)).status, "removed");
+  assert.equal((await cleanupTransaction({ ...payload, prNumber: null }, manual.ops)).status, "removed");
   assert.equal(manual.calls.includes("pull"), false);
 });
 
 test("archive failure never removes; postflight failure is partial", async () => {
-  const queryFailure = fixture(); queryFailure.ops.pullRequest = async () => { throw new Error("offline"); };
-  assert.equal((await cleanupTransaction(payload, queryFailure.ops)).status, "retry");
   const archiveFailure = fixture({ archiveFails: true });
   assert.equal((await cleanupTransaction(payload, archiveFailure.ops)).status, "stopped");
   assert.equal(archiveFailure.calls.includes("remove"), false);
@@ -163,20 +164,21 @@ test("missing workspace is a benign duplicate and watcher polls sequentially", a
   live.ops.pullRequest = async () => (++views === 1 ? { state: "OPEN", mergedAt: null } : { state: "MERGED", mergedAt: "now" });
   assert.equal(await watch(payload, live.ops, 0), "removed");
   assert.equal(live.calls.filter((call) => call === "delay").length, 1);
-  assert.equal(views, 3); // open, merged, then the immediate pre-archive recheck
+  assert.equal(views, 2);
+  assert.equal(live.calls.includes("cleanup"), true);
   const superseded = fixture(), currentWorkspace = superseded.ops.workspace; let reads = 0;
   superseded.ops.workspace = async () => ++reads === 1 ? currentWorkspace() : null;
   assert.equal(await watch(payload, superseded.ops, 0), "superseded");
 });
 
-test("serializes concurrent manual and automatic cleanup transactions", async () => {
+test("serializes concurrent cleanup requests", async () => {
   const first = fixture(), second = fixture(); let started, release;
   const entered = new Promise((resolve) => { started = resolve; });
   const blocked = new Promise((resolve) => { release = resolve; });
   first.ops.archive = async () => { first.calls.push("archive"); started(); await blocked; };
-  const running = cleanupTransaction(payload, first.ops, false);
+  const running = cleanupTransaction(payload, first.ops);
   await entered;
-  assert.equal((await cleanupTransaction({ ...payload, sessionId: "019cbe72-e55b-73d1-87d8-4e01f1f75044" }, second.ops, true)).status, "busy");
+  assert.equal((await cleanupTransaction({ ...payload, sessionId: "019cbe72-e55b-73d1-87d8-4e01f1f75044" }, second.ops)).status, "busy");
   assert.equal(second.calls.includes("archive"), false);
   release();
   assert.equal((await running).status, "removed");

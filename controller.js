@@ -27,6 +27,14 @@ function readJson(value, fallback = null) {
     return fallback;
   }
 }
+function autoCleanupOnPrMerge(configDir = process.env.HERDR_PLUGIN_CONFIG_DIR) {
+  if (!configDir) return false;
+  try {
+    return readJson(fs.readFileSync(path.join(configDir, "config.json"), "utf8"), {})["auto-cleanup-on-pr-merge"] === true;
+  } catch {
+    return false;
+  }
+}
 function execute(command, args) {
   const result = spawnSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
   if (result.error || result.status !== 0) {
@@ -420,6 +428,7 @@ function cleanupOps(workspaceId) {
     release: releaseOwnedAgent,
     archive: async (sessionId) => runCodex(["archive", sessionId]),
     remove: async (workspaceId) => runHerdr(["worktree", "remove", "--workspace", workspaceId]),
+    cleanup: async () => (await cleanupCurrentWorkflow(workspaceId)).result,
     project: async (state) => projectCleanup(workspaceId, state),
     notify: async (title, body) => notify(title, body, title === "Codex workflow cleaned up" ? "done" : "request"),
     delay,
@@ -443,6 +452,24 @@ async function handoffCleanup(runtime, repository) {
     ]);
   });
   notify("Codex workflow waiting for PR merge", "The workspace will be cleaned up after this pull request merges.");
+}
+
+async function cleanupCurrentWorkflow(workspaceId) {
+  const workspace = getWorkspace(workspaceId);
+  if (!workspace) return { result: { status: "missing" }, worktree: null, branch: null };
+  const { worktree, tokens } = manualWorkspace(workspace);
+  const branch = git(worktree.checkout_path, ["branch", "--show-current"]);
+  const payload = {
+    version: 1, workflow: tokens.workflow_kind, workspaceId,
+    rootPaneId: tokens.workflow_root_pane, worktreePath: worktree.checkout_path, repoRoot: worktree.repo_root,
+    repo: parseGitHubRemote(git(worktree.checkout_path, ["remote", "get-url", "origin"])),
+    branch, sessionId: tokens.workflow_session, prNumber: null,
+  };
+  const result = await withCleanupClaim(payload, async () => {
+    projectCleanup(workspaceId, "manual");
+    return cleanupTransaction(payload, cleanupOps(workspaceId), true);
+  });
+  return { result, worktree, branch };
 }
 
 async function releaseOwnedAgent(workspaceId, paneId, sessionId, worktreePath) {
@@ -680,13 +707,17 @@ async function controller(mode = "github") {
     project(runtime);
     await monitor(runtime, repository);
     if (runtime.terminal?.status === "complete") {
-      try {
-        await handoffCleanup(runtime, repository);
-      }
-      catch (error) {
-        try { projectCleanup(runtime.worktree.workspace.workspace_id, "stopped"); } catch (projectError) { console.error(`cleanup metadata update failed: ${projectError.message}`); }
-        notify("Codex workflow cleanup stopped", "Automatic cleanup could not be armed; the workspace and branch remain.");
-        console.error(`cleanup handoff failed: ${error.message}`);
+      if (autoCleanupOnPrMerge()) {
+        try {
+          await handoffCleanup(runtime, repository);
+        }
+        catch (error) {
+          try { projectCleanup(runtime.worktree.workspace.workspace_id, "stopped"); } catch (projectError) { console.error(`cleanup metadata update failed: ${projectError.message}`); }
+          notify("Codex workflow cleanup stopped", "Automatic cleanup could not be armed; the workspace and branch remain.");
+          console.error(`cleanup handoff failed: ${error.message}`);
+        }
+      } else {
+        projectCleanup(runtime.worktree.workspace.workspace_id, "manual");
       }
     } else {
       try { await releaseParent(runtime); } catch (error) { console.error(`parent release failed: ${error.message}`); }
@@ -833,19 +864,7 @@ async function readPopupInput(mode = "github") {
 async function cleanup() {
   const context = readJson(process.env.HERDR_PLUGIN_CONTEXT_JSON, {});
   if (!context.workspace_id) throw new Error("cleanup requires a current workflow workspace");
-  const workspace = getWorkspace(context.workspace_id);
-  const { worktree, tokens } = manualWorkspace(workspace);
-  const branch = git(worktree.checkout_path, ["branch", "--show-current"]);
-  const payload = {
-    version: 1, workflow: tokens.workflow_kind, workspaceId: context.workspace_id,
-    rootPaneId: tokens.workflow_root_pane, worktreePath: worktree.checkout_path, repoRoot: worktree.repo_root,
-    repo: parseGitHubRemote(git(worktree.checkout_path, ["remote", "get-url", "origin"])),
-    branch, sessionId: tokens.workflow_session, prNumber: null,
-  };
-  const result = await withCleanupClaim(payload, async () => {
-    projectCleanup(context.workspace_id, "manual");
-    return cleanupTransaction(payload, cleanupOps(context.workspace_id), false, true);
-  });
+  const { result, worktree, branch } = await cleanupCurrentWorkflow(context.workspace_id);
   if (result.status === "removed") return notify("Codex workflow cleaned up", `Archived its Codex session and removed ${worktree.checkout_path}; branch ${branch} remains.`, "done");
   if (result.status === "missing") return;
   if (result.status === "busy") {
@@ -876,7 +895,7 @@ async function main() {
   throw new Error("expected start, popup, progress, cleanup, or watch mode");
 }
 
-module.exports = { canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup, openProgressPane,
+module.exports = { autoCleanupOnPrMerge, canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup, openProgressPane,
   implementationPullRequest, isAgentPromptStalled, monitor, popupInputKey, popupInputView, progressView, resolveRepository, sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands,
   waitForActivity };
 
