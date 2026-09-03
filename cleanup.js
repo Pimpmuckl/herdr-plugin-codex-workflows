@@ -49,26 +49,35 @@ function matchingSession(agents, workspaceId, rootPaneId) {
     && agent.agent_session.kind === "id"
     && UUID.test(agent.agent_session.value));
   if (matches.length !== 1) throw new CleanupStop(`expected one owning Codex session; found ${matches.length}`);
-  if (!['idle', 'done'].includes(matches[0].agent_status)) {
-    const error = new CleanupStop("owning Codex session is still active");
-    error.retryable = true;
-    throw error;
-  }
   return matches[0];
 }
 
 function matchingOwnedSession(agents, workspaceId, rootPaneId, sessionId) {
   const agent = matchingSession(agents, workspaceId, rootPaneId);
   if (!UUID.test(sessionId) || agent.agent_session.value.toLowerCase() !== sessionId.toLowerCase()) throw new CleanupStop("owning Codex session changed");
+  if (!["idle", "done"].includes(agent.agent_status)) {
+    const error = new CleanupStop("owning Codex session is still active");
+    error.retryable = true;
+    throw error;
+  }
   return agent;
 }
 
-function manualWorkspace(workspace) {
-  const worktree = workspace?.worktree, tokens = workspace?.tokens || {};
-  if (!worktree?.is_linked_worktree || !TERMINAL_STATES.has(tokens.workflow_state)
+function manualWorkspace(workspace, agents = []) {
+  const worktree = workspace?.worktree;
+  let tokens = workspace?.tokens || {};
+  const running = tokens.workflow_state === "RUNNING";
+  if (running && (!tokens.workflow_root_pane || !UUID.test(tokens.workflow_session))) {
+    const owner = matchingSession(agents, workspace.workspace_id, tokens.workflow_root_pane);
+    tokens = { ...tokens, workflow_root_pane: owner.pane_id, workflow_session: owner.agent_session.value };
+  }
+  if (!worktree?.is_linked_worktree || (!TERMINAL_STATES.has(tokens.workflow_state) && !running)
     || !WORKFLOW_KINDS.has(tokens.workflow_kind) || !tokens.workflow_root_pane
-    || !UUID.test(tokens.workflow_session)) throw new CleanupStop("current workspace has no terminal Codex workflow metadata");
-  if (tokens.workflow_controller !== "inactive") throw new CleanupStop("workflow controller is still active");
+    || !UUID.test(tokens.workflow_session)) throw new CleanupStop("current workspace has no Codex workflow metadata");
+  if (tokens.workflow_controller !== (running ? "active" : "inactive")) throw new CleanupStop("workflow controller state is inconsistent");
+  if (running && !String(tokens.workflow_controller_pipe || "").startsWith("\\\\.\\pipe\\herdr-codex-workflows-")) {
+    throw new CleanupStop("active workflow does not support coordinated cleanup");
+  }
   return { worktree, tokens };
 }
 
@@ -79,16 +88,19 @@ function classifyPullRequest(value) {
   return "retry";
 }
 
-function assertLocalIdentity(payload, snapshot, allowOwner = false) {
+function assertLocalIdentity(payload, snapshot, allowOwner = false, allowRunning = false) {
   const workspace = snapshot.workspace;
   if (!workspace) return false;
   const worktree = workspace.worktree, tokens = workspace.tokens || {};
   if (workspace.workspace_id !== payload.workspaceId || !worktree?.is_linked_worktree
     || normalizePath(worktree.checkout_path) !== normalizePath(payload.worktreePath)
     || normalizePath(worktree.repo_root) !== normalizePath(payload.repoRoot)) throw new CleanupStop("workspace identity changed");
-  if (!TERMINAL_STATES.has(tokens.workflow_state) || tokens.workflow_kind !== payload.workflow || tokens.workflow_controller !== "inactive"
-    || tokens.workflow_branch !== payload.branch || tokens.workflow_root_pane !== payload.rootPaneId
-    || String(tokens.workflow_session || "").toLowerCase() !== payload.sessionId.toLowerCase()) {
+  const lifecycleMatches = (TERMINAL_STATES.has(tokens.workflow_state) && tokens.workflow_controller === "inactive")
+    || (allowRunning && tokens.workflow_state === "RUNNING" && tokens.workflow_controller === "active");
+  const rootMatches = tokens.workflow_root_pane ? tokens.workflow_root_pane === payload.rootPaneId : allowRunning;
+  const sessionMatches = tokens.workflow_session ? String(tokens.workflow_session).toLowerCase() === payload.sessionId.toLowerCase() : allowRunning;
+  if (!lifecycleMatches || tokens.workflow_kind !== payload.workflow
+    || tokens.workflow_branch !== payload.branch || !rootMatches || !sessionMatches) {
     throw new CleanupStop("workflow cleanup metadata changed");
   }
   const rootAgents = snapshot.agents.filter((agent) => agent.workspace_id === payload.workspaceId && agent.pane_id === payload.rootPaneId);
@@ -122,9 +134,9 @@ async function snapshot(payload, ops) {
   };
 }
 
-async function preflight(payload, ops, allowOwner = false) {
+async function preflight(payload, ops, allowOwner = false, allowRunning = false) {
   payload = validatePayload(payload);
-  return assertLocalIdentity(payload, await snapshot(payload, ops), allowOwner);
+  return assertLocalIdentity(payload, await snapshot(payload, ops), allowOwner, allowRunning);
 }
 
 async function withCleanupClaim(payload, callback) {
@@ -148,13 +160,15 @@ async function withCleanupClaim(payload, callback) {
 async function cleanupTransaction(payload, ops, claimed = false) {
   payload = validatePayload(payload);
   if (!claimed) return withCleanupClaim(payload, () => cleanupTransaction(payload, ops, true));
+  const abandon = typeof ops.abandon === "function";
   try {
-    if (!await preflight(payload, ops, true)) return { status: "missing" };
+    if (!await preflight(payload, ops, true, abandon)) return { status: "missing" };
   } catch (error) {
     if (error.retryable) return { status: "retry", reason: safeReason(error, "Owning Codex session is still active.") };
     return { status: "stopped", reason: safeReason(error, "Cleanup preflight failed; the workspace was retained.") };
   }
   try {
+    if (abandon) await ops.abandon();
     await ops.release(payload.workspaceId, payload.rootPaneId, payload.sessionId, payload.worktreePath);
   } catch (error) {
     if (error.retryable) return { status: "retry", reason: safeReason(error, "Owning Codex session is still active.") };

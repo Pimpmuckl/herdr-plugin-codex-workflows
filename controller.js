@@ -256,6 +256,8 @@ function project(runtime, state = "working", reason = "") {
   const workspaceId = runtime.worktree.workspace.workspace_id;
   const paneId = runtime.worktree.root_pane.pane_id;
   try {
+    const owner = getAgent(runtime.identity.agentName);
+    if (owner) runtime.ownerSessionId = matchingSession([owner], workspaceId, paneId).agent_session.value;
     runHerdr(["workspace", "rename", workspaceId, `[${runtime.identity.shortLabel}] ${text}`]);
     runHerdr([
       "workspace", "report-metadata", workspaceId, "--source", METADATA_SOURCE,
@@ -264,6 +266,8 @@ function project(runtime, state = "working", reason = "") {
       "--token", `workflow_phase=${phase}`,
       "--token", "workflow_controller=active",
       "--token", `workflow_branch=${runtime.identity.branch}`,
+      "--token", `workflow_controller_pipe=${runtime.controllerPipe}`,
+      ...(runtime.ownerSessionId ? ["--token", `workflow_root_pane=${paneId}`, "--token", `workflow_session=${runtime.ownerSessionId}`] : []),
     ]);
     runHerdr([
       "pane", "report-metadata", paneId, "--source", METADATA_SOURCE,
@@ -411,15 +415,17 @@ function listAgents() {
   return runHerdrJson(["agent", "list"])?.result?.agents || [];
 }
 
-function projectCleanup(workspaceId, state) {
+function projectCleanup(workspaceId, state, workflowState, owner) {
   if (!getWorkspace(workspaceId)) return;
   runHerdr([
     "workspace", "report-metadata", workspaceId, "--source", METADATA_SOURCE,
     "--token", "workflow_controller=inactive", "--token", `workflow_cleanup=${state}`,
+    ...(workflowState ? ["--token", `workflow_state=${workflowState}`, "--token", `workflow_phase=${workflowState}`] : []),
+    ...(owner ? ["--token", `workflow_root_pane=${owner.rootPaneId}`, "--token", `workflow_session=${owner.sessionId}`] : []),
   ]);
 }
 
-function cleanupOps(workspaceId) {
+function cleanupOps(workspaceId, abandon) {
   return {
     workspace: async (workspaceId) => getWorkspace(workspaceId),
     agents: async () => listAgents(),
@@ -432,6 +438,9 @@ function cleanupOps(workspaceId) {
     project: async (state) => projectCleanup(workspaceId, state),
     notify: async (title, body) => notify(title, body, title === "Codex workflow cleaned up" ? "done" : "request"),
     delay,
+    ...(abandon ? { abandon: async () => {
+      await requestControllerCleanup(abandon);
+    } } : {}),
   };
 }
 
@@ -457,7 +466,8 @@ async function handoffCleanup(runtime, repository) {
 async function cleanupCurrentWorkflow(workspaceId) {
   const workspace = getWorkspace(workspaceId);
   if (!workspace) return { result: { status: "missing" }, worktree: null, branch: null };
-  const { worktree, tokens } = manualWorkspace(workspace);
+  const { worktree, tokens } = manualWorkspace(workspace, listAgents());
+  const abandon = tokens.workflow_state === "RUNNING";
   const branch = git(worktree.checkout_path, ["branch", "--show-current"]);
   const payload = {
     version: 1, workflow: tokens.workflow_kind, workspaceId,
@@ -466,10 +476,10 @@ async function cleanupCurrentWorkflow(workspaceId) {
     branch, sessionId: tokens.workflow_session, prNumber: null,
   };
   const result = await withCleanupClaim(payload, async () => {
-    projectCleanup(workspaceId, "manual");
-    return cleanupTransaction(payload, cleanupOps(workspaceId), true);
+    if (!abandon) projectCleanup(workspaceId, "manual");
+    return cleanupTransaction(payload, cleanupOps(workspaceId, abandon ? { ...payload, controllerPipe: tokens.workflow_controller_pipe } : null), true);
   });
-  return { result, worktree, branch };
+  return { result, worktree, branch, abandon };
 }
 
 async function releaseOwnedAgent(workspaceId, paneId, sessionId, worktreePath) {
@@ -482,6 +492,21 @@ async function releaseOwnedAgent(workspaceId, paneId, sessionId, worktreePath) {
   const outsideCwd = path.parse(path.resolve(worktreePath)).root;
   runHerdr(["pane", "run", paneId, `cd ${outsideCwd}`]);
   await waitForShell(paneId, outsideCwd);
+}
+
+async function requestControllerCleanup(owner) {
+  const client = await connectPipe(owner.controllerPipe);
+  let timer;
+  try {
+    const reply = await Promise.race([
+      client.request({ type: "cleanup", rootPaneId: owner.rootPaneId, sessionId: owner.sessionId }),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("workflow controller did not release cleanup ownership")), 30000); }),
+    ]);
+    if (!reply.ok) throw new Error(reply.error);
+  } finally {
+    clearTimeout(timer);
+    client.socket.end();
+  }
 }
 
 async function releaseParent(runtime) {
@@ -514,7 +539,9 @@ async function monitor(runtime, repository, operations = {}) {
   const wait = operations.delay || delay;
   let lastProjection = "working", wasSettled = false;
   while (true) {
-    if (!workspace(runtime.worktree.workspace.workspace_id)) {
+    if (runtime.cleanupRequest) return "cleanup";
+    const currentWorkspace = workspace(runtime.worktree.workspace.workspace_id);
+    if (!currentWorkspace) {
       runtime.terminal = { type: "terminal", status: "cancelled", reason: "workflow workspace was closed" };
     }
     const agent = agentByName(runtime.identity.agentName);
@@ -527,8 +554,10 @@ async function monitor(runtime, repository, operations = {}) {
     } else if (!agent) {
       throw new Error("Codex parent exited before the workflow completed");
     } else if (runtime.prompt?.finished && ["idle", "done"].includes(agent.agent_status)) {
-      if (wasSettled) {
-        const resumed = await activity(runtime.identity.agentName);
+        if (wasSettled) {
+          const resumed = await activity(runtime.identity.agentName);
+          await new Promise((resolve) => setImmediate(resolve));
+          if (runtime.cleanupRequest) return "cleanup";
         if (resumed) {
           wasSettled = false;
           const projection = resumed.agent_status === "blocked" ? "blocked" : "working";
@@ -620,9 +649,22 @@ function controllerProtocol(runtime, lifecycle, resolveHello, resolveInput, reso
         return {};
       }
       if (connection.role === "progress" && message?.type === "status") return { launch: { ...runtime.launch } };
+      if (message?.type === "cleanup") {
+        if (runtime.cleanupRequest) throw new Error("controller cleanup is already requested");
+        if (message.rootPaneId !== runtime.worktree?.root_pane?.pane_id
+          || message.sessionId !== runtime.ownerSessionId) throw new Error("cleanup requester does not own this workflow");
+        let acknowledge, cancel;
+        const request = { connection, owner: { rootPaneId: message.rootPaneId, sessionId: message.sessionId },
+          acknowledged: new Promise((resolve, reject) => { acknowledge = resolve; cancel = reject; }) };
+        Object.assign(request, { acknowledge, cancel });
+        runtime.cleanupRequest = request;
+        try { await request.acknowledged; return {}; }
+        finally { if (runtime.cleanupRequest === request) runtime.cleanupRequest = null; }
+      }
       throw new Error("unsupported workflow message");
     },
     disconnect(connection) {
+      if (runtime.cleanupRequest?.connection === connection) runtime.cleanupRequest.cancel(new Error("cleanup requester disconnected"));
       if (connection.role === "input" && lifecycle.state === "COLLECTING") {
         lifecycle.transition("cancel");
         resolveInput(null);
@@ -645,6 +687,7 @@ async function controller(mode = "github") {
   const progressPromise = new Promise((resolve) => { resolveProgress = resolve; });
   const runtime = {
     workflow: mode === "task" ? "task" : null, lifecycle, terminal: null,
+    controllerPipe: pipeName, cleanupRequest: null,
     launch: { status: "collecting", step: 0, repo: repository.repo, repositorySource: "current" },
   };
   const server = await createPipeServer(pipeName, controllerProtocol(runtime, lifecycle, resolveHello, resolveInput, resolveProgress));
@@ -705,7 +748,13 @@ async function controller(mode = "github") {
     runtime.launch.step = launchSteps.length;
     await delay(0);
     project(runtime);
-    await monitor(runtime, repository);
+    if (await monitor(runtime, repository) === "cleanup") {
+      const cleanupRequest = runtime.cleanupRequest;
+      try { projectCleanup(runtime.worktree.workspace.workspace_id, "manual", "cancelled", cleanupRequest.owner); }
+      catch (error) { cleanupRequest.cancel(error); throw error; }
+      cleanupRequest.acknowledge();
+      return;
+    }
     if (runtime.terminal?.status === "complete") {
       if (autoCleanupOnPrMerge()) {
         try {
@@ -864,14 +913,20 @@ async function readPopupInput(mode = "github") {
 async function cleanup() {
   const context = readJson(process.env.HERDR_PLUGIN_CONTEXT_JSON, {});
   if (!context.workspace_id) throw new Error("cleanup requires a current workflow workspace");
-  const { result, worktree, branch } = await cleanupCurrentWorkflow(context.workspace_id);
+  let cleanup;
+  try { cleanup = await cleanupCurrentWorkflow(context.workspace_id); }
+  catch (error) {
+    notify("Codex workflow cleanup stopped", error.message);
+    throw error;
+  }
+  const { result, worktree, branch, abandon } = cleanup;
   if (result.status === "removed") return notify("Codex workflow cleaned up", `Archived its Codex session and removed ${worktree.checkout_path}; branch ${branch} remains.`, "done");
   if (result.status === "missing") return;
   if (result.status === "busy") {
     notify("Codex workflow cleanup stopped", result.reason);
     throw new Error(result.reason);
   }
-  projectCleanup(context.workspace_id, result.status);
+  if (!abandon) projectCleanup(context.workspace_id, result.status);
   notify(result.status === "partial" ? "Codex workflow partially cleaned up" : "Codex workflow cleanup stopped", result.reason);
   throw new Error(result.reason);
 }

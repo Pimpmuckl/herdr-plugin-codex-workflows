@@ -270,6 +270,28 @@ test("issue completion waits for a PR and rechecks after follow-up activity", as
   assert.equal(runtime.terminal["pr-url"], "https://github.com/owner/repo/pull/12");
 });
 
+test("controller yields when manual cleanup takes ownership", async () => {
+  const result = await monitor({ terminal: null, cleanupRequest: {}, worktree: { workspace: { workspace_id: "w1" } } }, {}, {
+    workspace: () => assert.fail("cleanup is checked before workspace state"),
+    agent: () => assert.fail("cleanup owns the agent before monitor checks it"),
+  });
+  assert.equal(result, "cleanup");
+});
+
+test("controller acknowledges cleanup only after yielding", async () => {
+  const runtime = { cleanupRequest: null, ownerSessionId: "019cbe72-e55b-73d1-87d8-4e01f1f75043",
+    worktree: { root_pane: { pane_id: "w1:p1" } }, launch: {} };
+  const protocol = controllerProtocol(runtime, new Lifecycle(), () => {}, () => {});
+  let settled = false;
+  const request = protocol.message({ type: "cleanup", rootPaneId: "w1:p1", sessionId: runtime.ownerSessionId }, {})
+    .then((reply) => { settled = true; return reply; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(runtime.cleanupRequest);
+  assert.equal(settled, false);
+  runtime.cleanupRequest.acknowledge();
+  assert.deepEqual(await request, {});
+});
+
 test("task completion uses the implementation pull request path", async () => {
   const lifecycle = new Lifecycle();
   lifecycle.transition("submit");

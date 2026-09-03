@@ -23,9 +23,10 @@ function fixture(options = {}) {
   const calls = [];
   let archived = false, released = false;
   const workspace = { workspace_id: "w9", tokens: {
-    workflow_kind: "issue", workflow_state: "complete", workflow_controller: "inactive",
+    workflow_kind: "issue", workflow_state: options.running ? "RUNNING" : "complete", workflow_controller: options.running ? "active" : "inactive",
     workflow_branch: payload.branch, workflow_cleanup: "waiting",
     workflow_root_pane: payload.rootPaneId, workflow_session: payload.sessionId,
+    ...(options.running ? { workflow_controller_pipe: "\\\\.\\pipe\\herdr-codex-workflows-test" } : {}),
   }, worktree: { is_linked_worktree: true, checkout_path: payload.worktreePath, repo_root: payload.repoRoot } };
   const ops = {
     async workspace() { calls.push("workspace"); return options.missing ? null : workspace; },
@@ -58,15 +59,21 @@ function fixture(options = {}) {
     async notify(title) { calls.push(`notify:${title}`); },
     async delay() { calls.push("delay"); },
   };
+  if (options.abandon) ops.abandon = async () => {
+    calls.push("abandon");
+    Object.assign(workspace.tokens, { workflow_state: "cancelled", workflow_controller: "inactive", workflow_cleanup: "manual",
+      workflow_root_pane: payload.rootPaneId, workflow_session: payload.sessionId });
+  };
   ops.cleanup = async () => { calls.push("cleanup"); return cleanupTransaction(payload, ops); };
   return { calls, ops };
 }
 
-test("captures exactly one idle root-pane Codex UUID", () => {
+test("captures one root-pane Codex UUID and requires its owner to settle", () => {
   assert.equal(matchingSession([agent()], "w9", "w9:p1").agent_session.value, payload.sessionId);
+  assert.equal(matchingSession([agent({ agent_status: "working" })], "w9", "w9:p1").agent_session.value, payload.sessionId);
   assert.throws(() => matchingSession([], "w9", "w9:p1"), /found 0/);
   assert.throws(() => matchingSession([agent(), agent()], "w9", "w9:p1"), /found 2/);
-  assert.throws(() => matchingSession([agent({ agent_status: "working" })], "w9", "w9:p1"), /still active/);
+  assert.throws(() => matchingOwnedSession([agent({ agent_status: "working" })], "w9", "w9:p1", payload.sessionId), /still active/);
   assert.throws(() => matchingOwnedSession([agent()], "w9", "w9:p1", "019cbe72-e55b-73d1-87d8-4e01f1f75044"), /session changed/);
 });
 
@@ -135,12 +142,25 @@ test("cleanup archives, rechecks, then removes without querying GitHub", async (
   assert.equal((await cleanupTransaction(payload, fixture({ noOwner: true }).ops)).status, "removed");
   const manual = fixture();
   const manualData = await manual.ops.workspace();
-  assert.throws(() => manualWorkspace({ ...manualData, tokens: { workflow_kind: "issue", workflow_state: "complete", workflow_controller: "inactive" } }), /no terminal/);
-  assert.throws(() => manualWorkspace({ ...manualData, tokens: { ...manualData.tokens, workflow_controller: "active", workflow_root_pane: payload.rootPaneId, workflow_session: payload.sessionId } }), /still active/);
+  assert.throws(() => manualWorkspace({ ...manualData, tokens: { workflow_kind: "issue", workflow_state: "complete", workflow_controller: "inactive" } }), /no Codex workflow/);
+  assert.throws(() => manualWorkspace({ ...manualData, tokens: { ...manualData.tokens, workflow_controller: "active", workflow_root_pane: payload.rootPaneId, workflow_session: payload.sessionId } }), /inconsistent/);
   const manualIdentity = manualWorkspace({ ...manualData, tokens: { ...manualData.tokens, workflow_root_pane: payload.rootPaneId, workflow_session: payload.sessionId } });
   assert.equal(manualIdentity.tokens.workflow_session, payload.sessionId);
   assert.equal((await cleanupTransaction({ ...payload, prNumber: null }, manual.ops)).status, "removed");
   assert.equal(manual.calls.includes("pull"), false);
+
+  const waiting = fixture({ running: true, abandon: true });
+  const waitingWorkspace = await waiting.ops.workspace();
+  delete waitingWorkspace.tokens.workflow_root_pane;
+  delete waitingWorkspace.tokens.workflow_session;
+  assert.equal(manualWorkspace(waitingWorkspace, [agent()]).tokens.workflow_session, payload.sessionId);
+  assert.equal((await cleanupTransaction(payload, waiting.ops)).status, "removed");
+  assert.deepEqual(waiting.calls.filter((call) => ["abandon", "release", "archive", "remove"].includes(call)), ["abandon", "release", "archive", "remove"]);
+
+  const resumed = fixture({ running: true, abandon: true, ownerResumes: true });
+  assert.equal((await cleanupTransaction(payload, resumed.ops)).status, "retry");
+  assert.equal((await resumed.ops.workspace()).tokens.workflow_cleanup, "manual");
+  assert.equal(resumed.calls.includes("archive"), false);
 });
 
 test("archive failure never removes; postflight failure is partial", async () => {

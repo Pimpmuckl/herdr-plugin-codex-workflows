@@ -97,9 +97,10 @@ rechecks the local identity and cleanliness and asks Herdr to remove the
 workspace and worktree without force. The workflow branch remains.
 
 Failure and cancellation keep all workflow state. The
-`cleanup-current-workflow` action uses the same archive-first transaction for a
-terminal workflow without waiting for a merge. It refuses a changed identity,
-dirty worktree, active controller, working or changed agent, path outside
+`cleanup-current-workflow` action uses the same archive-first transaction
+without waiting for a merge. For an idle or waiting active workflow, it first
+cancels the controller. It refuses a changed identity, dirty worktree, working
+or changed agent, path outside
 `C:\Code\.worktrees`, or an ambiguous Codex session. An archive failure removes
 nothing; a failure after archive keeps the worktree for manual inspection.
 
