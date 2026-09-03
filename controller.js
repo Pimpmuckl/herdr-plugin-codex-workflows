@@ -417,6 +417,7 @@ function cleanupOps(workspaceId) {
     agents: async () => listAgents(),
     git: async (cwd, args) => git(cwd, args),
     pullRequest: async (repo, number) => readJson(execute(gh, ["pr", "view", String(number), "--repo", repo, "--json", "state,mergedAt"])),
+    release: releaseOwnedAgent,
     archive: async (sessionId) => runCodex(["archive", sessionId]),
     remove: async (workspaceId) => runHerdr(["worktree", "remove", "--workspace", workspaceId]),
     project: async (state) => projectCleanup(workspaceId, state),
@@ -444,17 +445,21 @@ async function handoffCleanup(runtime, repository) {
   notify("Codex workflow waiting for PR merge", "The workspace will be cleaned up after this pull request merges.");
 }
 
-async function releaseParent(runtime) {
-  const paneId = runtime.worktree.root_pane.pane_id;
-  const rootAgents = listAgents().filter((agent) => agent.workspace_id === runtime.worktree.workspace.workspace_id && agent.pane_id === paneId);
-  if (rootAgents.length) {
-    matchingOwnedSession(rootAgents, runtime.worktree.workspace.workspace_id, paneId, runtime.ownerSessionId);
-    runHerdr(["agent", "prompt", runtime.identity.agentName, "/quit"]);
+async function releaseOwnedAgent(workspaceId, paneId, sessionId, worktreePath) {
+  const agent = getAgent(paneId);
+  if (agent) {
+    matchingOwnedSession([agent], workspaceId, paneId, sessionId);
+    runHerdr(["agent", "prompt", paneId, "/quit"]);
   }
   await waitForShell(paneId);
-  const outsideCwd = path.parse(path.resolve(runtime.worktree.path)).root;
+  const outsideCwd = path.parse(path.resolve(worktreePath)).root;
   runHerdr(["pane", "run", paneId, `cd ${outsideCwd}`]);
   await waitForShell(paneId, outsideCwd);
+}
+
+async function releaseParent(runtime) {
+  return releaseOwnedAgent(runtime.worktree.workspace.workspace_id, runtime.worktree.root_pane.pane_id,
+    runtime.ownerSessionId, runtime.worktree.path);
 }
 
 function implementationPullRequest(runtime, repository, matches = readJson(execute(gh, [
@@ -674,13 +679,7 @@ async function controller(mode = "github") {
     await delay(0);
     project(runtime);
     await monitor(runtime, repository);
-    let releaseError = null;
-    try { await releaseParent(runtime); } catch (error) { releaseError = error; console.error(`parent release failed: ${error.message}`); }
-    if (runtime.terminal?.status === "complete" && releaseError) {
-      try { projectCleanup(runtime.worktree.workspace.workspace_id, "stopped"); }
-      catch (error) { console.error(`cleanup metadata update failed: ${error.message}`); }
-      notify("Codex workflow release failed", "The workspace remains. Close any active Codex agent before cleanup.");
-    } else if (runtime.terminal?.status === "complete") {
+    if (runtime.terminal?.status === "complete") {
       try {
         await handoffCleanup(runtime, repository);
       }
@@ -689,6 +688,8 @@ async function controller(mode = "github") {
         notify("Codex workflow cleanup stopped", "Automatic cleanup could not be armed; the workspace and branch remain.");
         console.error(`cleanup handoff failed: ${error.message}`);
       }
+    } else {
+      try { await releaseParent(runtime); } catch (error) { console.error(`parent release failed: ${error.message}`); }
     }
   } catch (error) {
     runtime.launch.status = "failed";

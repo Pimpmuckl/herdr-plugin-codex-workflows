@@ -21,7 +21,7 @@ function agent(overrides = {}) {
 
 function fixture(options = {}) {
   const calls = [];
-  let archived = false, mergeChecked = false;
+  let archived = false, mergeChecked = false, released = false;
   const workspace = { workspace_id: "w9", tokens: {
     workflow_kind: "issue", workflow_state: "complete", workflow_controller: "inactive",
     workflow_branch: payload.branch, workflow_cleanup: "waiting",
@@ -31,9 +31,13 @@ function fixture(options = {}) {
     async workspace() { calls.push("workspace"); return options.missing ? null : workspace; },
     async agents() {
       if (archived && options.postAgent) return [agent(options.postAgent)];
-      if (options.active) return [agent({ pane_id: "w9:p2", agent_status: "working" })];
-      if (options.ownerActive) return [agent()];
-      return options.rootReplacement || (options.replacementAfterPull && mergeChecked) ? [agent({ agent_status: "working", agent_session: { source: "herdr:claude", kind: "id", value: "replacement" } })] : [];
+      if (released) return [];
+      if (options.active) return [agent(), agent({ pane_id: "w9:p2", agent_status: "working" })];
+      if (options.ownerWorking) return [agent({ agent_status: "working" })];
+      if (options.rootReplacement || (options.replacementAfterPull && mergeChecked)) {
+        return [agent({ agent_status: "working", agent_session: { source: "herdr:claude", kind: "id", value: "replacement" } })];
+      }
+      return options.noOwner ? [] : [agent()];
     },
     async git(_cwd, args) {
       if (args[0] === "remote") return "https://github.com/owner/repo.git";
@@ -42,6 +46,12 @@ function fixture(options = {}) {
       return `worktree ${payload.repoRoot}\nbranch refs/heads/master\n\nworktree ${payload.worktreePath}\nbranch refs/heads/${payload.branch}\n`;
     },
     async pullRequest() { calls.push("pull"); mergeChecked = true; return options.pull || { state: "MERGED", mergedAt: "2026-09-01T00:00:00Z" }; },
+    async release() {
+      calls.push("release");
+      if (options.ownerResumes) { const error = new Error("owner resumed"); error.retryable = true; throw error; }
+      if (options.releaseFails) throw new Error("release failed");
+      released = true;
+    },
     async archive() { calls.push("archive"); if (options.archiveFails) throw new Error("archive failed"); archived = true; },
     async remove() { calls.push("remove"); if (options.removeFails) throw new Error("remove failed"); },
     async project(state) { calls.push(`project:${state}`); },
@@ -98,17 +108,28 @@ test("detached watcher arms before authorization and IPC release", async () => {
 });
 
 test("refuses concrete identity, dirty, and active-agent mismatches before archive", async () => {
-  for (const options of [{ branch: "other" }, { dirty: " M file" }, { active: true }, { ownerActive: true }, { rootReplacement: true }, { replacementAfterPull: true }]) {
+  for (const options of [{ branch: "other" }, { dirty: " M file" }, { active: true }, { rootReplacement: true }, { replacementAfterPull: true }]) {
     const { calls, ops } = fixture(options);
     assert.equal((await cleanupTransaction(payload, ops)).status, "stopped");
     assert.equal(calls.includes("archive"), false);
   }
 });
 
+test("waits for the exact owning agent to become idle before cleanup", async () => {
+  const { calls, ops } = fixture({ ownerWorking: true });
+  assert.equal((await cleanupTransaction(payload, ops)).status, "retry");
+  assert.equal(calls.includes("release"), false);
+  assert.equal(calls.includes("archive"), false);
+  const resumed = fixture({ ownerResumes: true });
+  assert.equal((await cleanupTransaction(payload, resumed.ops)).status, "retry");
+  assert.equal(resumed.calls.includes("archive"), false);
+});
+
 test("archives, rechecks, then removes; manual cleanup uses the same transaction without GitHub", async () => {
   const automatic = fixture();
   assert.equal((await cleanupTransaction(payload, automatic.ops)).status, "removed");
-  assert.deepEqual(automatic.calls.filter((call) => ["workspace", "archive", "remove"].includes(call)), ["workspace", "archive", "workspace", "remove"]);
+  assert.deepEqual(automatic.calls.filter((call) => ["workspace", "release", "archive", "remove"].includes(call)), ["workspace", "release", "archive", "workspace", "remove"]);
+  assert.equal((await cleanupTransaction(payload, fixture({ noOwner: true }).ops)).status, "removed");
   const manual = fixture();
   const manualData = await manual.ops.workspace();
   assert.throws(() => manualWorkspace({ ...manualData, tokens: { workflow_kind: "issue", workflow_state: "complete", workflow_controller: "inactive" } }), /no terminal/);
@@ -125,6 +146,9 @@ test("archive failure never removes; postflight failure is partial", async () =>
   const archiveFailure = fixture({ archiveFails: true });
   assert.equal((await cleanupTransaction(payload, archiveFailure.ops)).status, "stopped");
   assert.equal(archiveFailure.calls.includes("remove"), false);
+  const releaseFailure = fixture({ releaseFails: true });
+  assert.equal((await cleanupTransaction(payload, releaseFailure.ops)).status, "stopped");
+  assert.equal(releaseFailure.calls.includes("archive"), false);
   const partial = fixture({ postDirty: " M file" });
   assert.equal((await cleanupTransaction(payload, partial.ops)).status, "partial");
   assert.equal(partial.calls.includes("remove"), false);

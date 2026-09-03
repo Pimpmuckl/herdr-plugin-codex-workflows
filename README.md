@@ -78,20 +78,20 @@ or done, its workspace is marked waiting. A blocked Codex stays marked blocked
 for human input. In each case, Codex, the controller, worktree, and workspace
 stay available for follow-up. The controller checks again after follow-up
 activity settles. Once an implementation workflow has exactly one valid pull request,
-or a pull-request review completes, the controller exits the owning Codex
-process, releases its Herdr command slot, and starts the detached cleanup
-watcher for that pull request.
+or a pull-request review completes, the controller leaves the Codex session and
+worktree available, starts the detached cleanup watcher, and exits.
 
-An open pull request keeps the workspace intact. A closed, unmerged pull
-request also keeps it and stops the watcher. When GitHub reports an unambiguous
-merge, cleanup archives the exact owning Codex session, then rechecks the local
-identity and cleanliness and asks Herdr to remove the workspace and worktree
-without force. The workflow branch remains.
+An open pull request keeps the agent and workspace intact. A closed, unmerged
+pull request also keeps them and stops the watcher. When GitHub reports an
+unambiguous merge, cleanup waits for the exact owning Codex agent to settle,
+quits it, archives its session, then rechecks the local identity and cleanliness
+and asks Herdr to remove the workspace and worktree without force. The workflow
+branch remains.
 
 Failure and cancellation keep all workflow state. The
 `cleanup-current-workflow` action uses the same archive-first transaction for a
 terminal workflow without waiting for a merge. It refuses a changed identity,
-dirty worktree, active controller or agent, path outside
+dirty worktree, active controller, working or changed agent, path outside
 `C:\Code\.worktrees`, or an ambiguous Codex session. An archive failure removes
 nothing; a failure after archive keeps the worktree for manual inspection.
 

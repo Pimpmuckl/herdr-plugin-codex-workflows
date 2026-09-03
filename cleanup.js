@@ -49,7 +49,11 @@ function matchingSession(agents, workspaceId, rootPaneId) {
     && agent.agent_session.kind === "id"
     && UUID.test(agent.agent_session.value));
   if (matches.length !== 1) throw new CleanupStop(`expected one owning Codex session; found ${matches.length}`);
-  if (!['idle', 'done'].includes(matches[0].agent_status)) throw new CleanupStop("owning Codex session is still active");
+  if (!['idle', 'done'].includes(matches[0].agent_status)) {
+    const error = new CleanupStop("owning Codex session is still active");
+    error.retryable = true;
+    throw error;
+  }
   return matches[0];
 }
 
@@ -75,7 +79,7 @@ function classifyPullRequest(value) {
   return "retry";
 }
 
-function assertLocalIdentity(payload, snapshot, automatic, requireSession = true) {
+function assertLocalIdentity(payload, snapshot, automatic, allowOwner = false) {
   const workspace = snapshot.workspace;
   if (!workspace) return false;
   const worktree = workspace.worktree, tokens = workspace.tokens || {};
@@ -88,8 +92,11 @@ function assertLocalIdentity(payload, snapshot, automatic, requireSession = true
     || (automatic && (tokens.workflow_state !== "complete" || tokens.workflow_cleanup !== "waiting"))) {
     throw new CleanupStop("workflow cleanup metadata changed");
   }
-  if (snapshot.agents.some((agent) => agent.workspace_id === payload.workspaceId && agent.pane_id === payload.rootPaneId))
-    throw new CleanupStop(requireSession ? "root pane agent is still active or changed" : "root pane agent changed after session archive");
+  const rootAgents = snapshot.agents.filter((agent) => agent.workspace_id === payload.workspaceId && agent.pane_id === payload.rootPaneId);
+  if (rootAgents.length) {
+    if (!allowOwner) throw new CleanupStop("root pane agent changed after session archive");
+    matchingOwnedSession(rootAgents, payload.workspaceId, payload.rootPaneId, payload.sessionId);
+  }
   if (snapshot.agents.some((agent) => agent.workspace_id === payload.workspaceId
     && agent.pane_id !== payload.rootPaneId && !["idle", "done"].includes(agent.agent_status))) {
     throw new CleanupStop("workflow workspace has an active sibling agent");
@@ -116,9 +123,9 @@ async function snapshot(payload, ops) {
   };
 }
 
-async function preflight(payload, ops, automatic = true) {
+async function preflight(payload, ops, automatic = true, allowOwner = false) {
   payload = validatePayload(payload);
-  return assertLocalIdentity(payload, await snapshot(payload, ops), automatic);
+  return assertLocalIdentity(payload, await snapshot(payload, ops), automatic, allowOwner);
 }
 
 async function withCleanupClaim(payload, callback) {
@@ -149,9 +156,16 @@ async function cleanupTransaction(payload, ops, automatic = true, claimed = fals
     } catch { return { status: "retry" }; }
   }
   try {
-    if (!await preflight(payload, ops, automatic)) return { status: "missing" };
+    if (!await preflight(payload, ops, automatic, true)) return { status: "missing" };
   } catch (error) {
+    if (automatic && error.retryable) return { status: "retry" };
     return { status: "stopped", reason: safeReason(error, "Cleanup preflight failed; the workspace was retained.") };
+  }
+  try {
+    await ops.release(payload.workspaceId, payload.rootPaneId, payload.sessionId, payload.worktreePath);
+  } catch (error) {
+    if (automatic && error.retryable) return { status: "retry" };
+    return { status: "stopped", reason: "Codex session release failed; the workspace and worktree were retained." };
   }
   try {
     await ops.archive(payload.sessionId);
@@ -198,10 +212,12 @@ async function watch(payload, ops, interval = 60000) {
   payload = validatePayload(payload);
   if (payload.prNumber === null) throw new Error("cleanup watcher has no pull request");
   try {
-    if (!await preflight(payload, ops, true)) return "superseded";
+    if (!await preflight(payload, ops, true, true)) return "superseded";
   } catch (error) {
-    await ops.project("stopped"); await ops.notify("Codex workflow cleanup stopped", safeReason(error, "Cleanup preflight failed; the workspace was retained."));
-    return "stopped";
+    if (!error.retryable) {
+      await ops.project("stopped"); await ops.notify("Codex workflow cleanup stopped", safeReason(error, "Cleanup preflight failed; the workspace was retained."));
+      return "stopped";
+    }
   }
   while (true) {
     try {
