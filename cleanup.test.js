@@ -136,7 +136,10 @@ test("waits for the exact owning agent to become idle before cleanup", async () 
 
 test("cleanup archives, rechecks, then removes without querying GitHub", async () => {
   const cleanup = fixture();
+  const stages = [];
+  cleanup.ops.progress = async (step) => { stages.push(step); };
   assert.equal((await cleanupTransaction(payload, cleanup.ops)).status, "removed");
+  assert.deepEqual(stages, [0, 1, 2, 3, 4]);
   assert.deepEqual(cleanup.calls.filter((call) => ["workspace", "release", "archive", "remove"].includes(call)), ["workspace", "release", "archive", "workspace", "remove"]);
   assert.equal(cleanup.calls.includes("pull"), false);
   assert.equal((await cleanupTransaction(payload, fixture({ noOwner: true }).ops)).status, "removed");
@@ -165,7 +168,10 @@ test("cleanup archives, rechecks, then removes without querying GitHub", async (
 
 test("archive failure never removes; postflight failure is partial", async () => {
   const archiveFailure = fixture({ archiveFails: true });
+  const stages = [];
+  archiveFailure.ops.progress = async (step) => { stages.push(step); };
   assert.equal((await cleanupTransaction(payload, archiveFailure.ops)).status, "stopped");
+  assert.deepEqual(stages, [0, 1, 2]);
   assert.equal(archiveFailure.calls.includes("remove"), false);
   const releaseFailure = fixture({ releaseFails: true });
   assert.equal((await cleanupTransaction(payload, releaseFailure.ops)).status, "stopped");

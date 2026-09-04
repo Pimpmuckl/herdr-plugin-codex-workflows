@@ -20,6 +20,7 @@ const herdr = process.env.HERDR_BIN_PATH || "herdr", gitBin = process.env.GIT_BI
 const gh = process.env.GH_BIN_PATH || "gh", codexBin = process.env.CODEX_BIN_PATH;
 const CODE_ROOT = path.dirname(WORKTREE_ROOT);
 const launchSteps = ["Resolve repository", "Prepare request", "Create worktree", "Start Codex"];
+const cleanupSteps = ["Check workspace", "Stop Codex", "Archive session", "Check worktree", "Remove worktree"];
 function readJson(value, fallback = null) {
   try {
     return JSON.parse(value);
@@ -470,7 +471,7 @@ async function handoffCleanup(runtime, repository) {
   if (!payload.indicatorOnly) notify("Codex workflow waiting for PR merge", "The workspace will be cleaned up after this pull request merges.");
 }
 
-async function cleanupCurrentWorkflow(workspaceId) {
+async function cleanupCurrentWorkflow(workspaceId, progress) {
   const workspace = getWorkspace(workspaceId);
   if (!workspace) return { result: { status: "missing" }, worktree: null, branch: null };
   const { worktree, tokens } = manualWorkspace(workspace, listAgents());
@@ -484,7 +485,7 @@ async function cleanupCurrentWorkflow(workspaceId) {
   };
   const result = await withCleanupClaim(payload, async () => {
     if (!abandon) projectCleanup(workspaceId, "manual");
-    return cleanupTransaction(payload, cleanupOps(workspaceId, abandon ? { ...payload, controllerPipe: tokens.workflow_controller_pipe } : null), true);
+    return cleanupTransaction(payload, { ...cleanupOps(workspaceId, abandon ? { ...payload, controllerPipe: tokens.workflow_controller_pipe } : null), progress }, true);
   });
   return { result, worktree, branch, abandon };
 }
@@ -601,14 +602,17 @@ async function monitor(runtime, repository, operations = {}) {
 }
 
 function progressView(launch, frame = 0) {
-  const step = Math.max(0, Math.min(launchSteps.length, Number(launch.step) || 0));
-  const complete = launch.status === "started" ? launchSteps.length : step;
-  const width = 20, filled = Math.round((complete / launchSteps.length) * width);
+  const steps = launch.kind === "cleanup" ? cleanupSteps : launchSteps;
+  const step = Math.max(0, Math.min(steps.length, Number(launch.step) || 0));
+  const complete = launch.status === "started" ? steps.length : step;
+  const width = 20, filled = Math.round((complete / steps.length) * width);
   const spinner = "|/-\\"[frame % 4];
   const source = launch.repositorySource === "link" ? "full link" : "current workspace";
-  const checkpoint = launch.status === "started" ? "Codex started" : launchSteps[Math.min(step, launchSteps.length - 1)];
-  return `\x1b[2J\x1b[H${launch.repo} (${source})\n`
-    + `[${"#".repeat(filled)}${".".repeat(width - filled)}] ${Math.round((complete / launchSteps.length) * 100)}% ${spinner} ${checkpoint}\n`;
+  const checkpoint = launch.status === "started" ? (launch.kind === "cleanup" ? "Cleaned up" : "Codex started") : steps[Math.min(step, steps.length - 1)];
+  const title = launch.kind === "cleanup" ? "Cleaning up workspace" : `${launch.repo} (${source})`;
+  if (launch.status === "failed") return `\x1b[2J\x1b[H${title} stopped — Enter/Esc to close\n${launch.error}\n`;
+  return `\x1b[2J\x1b[H${title}\n`
+    + `[${"#".repeat(filled)}${".".repeat(width - filled)}] ${Math.round((complete / steps.length) * 100)}% ${spinner} ${checkpoint}\n`;
 }
 
 function openInputPopup(pipeName, mode = "github", invoke = runHerdr) {
@@ -796,7 +800,7 @@ async function controller(mode = "github") {
 async function showLaunchProgress(client) {
   let reply = await client.request({ type: "hello", role: "progress" });
   if (!reply.ok) throw new Error(reply.error);
-  let launch = { status: "running", step: 0, repo: "Starting workflow", repositorySource: "current" };
+  let launch = reply.launch || { status: "running", step: 0, repo: "Starting workflow", repositorySource: "current" };
   for (let frame = 0; ; frame += 1) {
     let failure, settled = false;
     reply = null;
@@ -809,7 +813,11 @@ async function showLaunchProgress(client) {
     if (!reply.ok) throw new Error(reply.error);
     launch = reply.launch;
     output.write(progressView(launch, frame));
-    if (launch.status === "failed") throw new Error(launch.error || "workflow launch failed");
+    if (launch.status === "failed") {
+      client.socket.end();
+      await dismissProgress();
+      return;
+    }
     if (launch.status === "started") { await delay(200); return; }
     await delay(80);
   }
@@ -835,6 +843,10 @@ async function progress() {
   if (!pipeName) throw new Error("progress pane was not launched by a workflow controller");
   const client = await connectPipe(pipeName);
   try { await showLaunchProgress(client); }
+  catch (error) {
+    output.write(`\x1b[2J\x1b[HProgress stopped — Enter/Esc to close\n${error.message}\n`);
+    await dismissProgress();
+  }
   finally { client.socket.end(); }
 }
 
@@ -857,6 +869,24 @@ function popupInputView(state, width = output.columns || 80, height = output.row
   const rows = [target, "─".repeat(Math.max(1, width - 1)), `${state.active === 1 ? ">" : " "} Custom instructions:`, ...instructions.map((line) => `  ${line}`)];
   const cursorRow = state.active === 0 ? 1 : rows.length;
   return `\x1b[2J\x1b[H${rows.join("\n")}\x1b[${cursorRow};${[...rows[cursorRow - 1]].length + 1}H`;
+}
+
+async function dismissProgress() {
+  if (!input.isTTY) return;
+  readline.emitKeypressEvents(input);
+  input.setRawMode(true);
+  input.resume();
+  try {
+    await new Promise((resolve) => {
+      function keypress(_text, key) {
+        if (["return", "enter", "escape"].includes(key.name) || (key.ctrl && key.name === "c")) {
+          input.off("keypress", keypress);
+          resolve();
+        }
+      }
+      input.on("keypress", keypress);
+    });
+  } finally { input.setRawMode(false); input.pause(); }
 }
 
 function popupInputKey(state, sequence, key) {
@@ -913,11 +943,10 @@ async function readPopupInput(mode = "github") {
   });
 }
 
-async function cleanup() {
-  const context = readJson(process.env.HERDR_PLUGIN_CONTEXT_JSON, {});
+async function runCleanup(context, progress) {
   if (!context.workspace_id) throw new Error("cleanup requires a current workflow workspace");
   let cleanup;
-  try { cleanup = await cleanupCurrentWorkflow(context.workspace_id); }
+  try { cleanup = await cleanupCurrentWorkflow(context.workspace_id, progress); }
   catch (error) {
     notify("Codex workflow cleanup stopped", error.message);
     throw error;
@@ -932,6 +961,44 @@ async function cleanup() {
   if (!abandon) projectCleanup(context.workspace_id, result.status);
   notify(result.status === "partial" ? "Codex workflow partially cleaned up" : "Codex workflow cleanup stopped", result.reason);
   throw new Error(result.reason);
+}
+
+async function cleanup() {
+  const context = readJson(process.env.HERDR_PLUGIN_CONTEXT_JSON, {});
+  const pipeName = makePipeName();
+  const launch = { kind: "cleanup", status: "running", step: 0 };
+  let ready, delivered;
+  const connected = new Promise((resolve) => { ready = resolve; });
+  const finished = new Promise((resolve) => { delivered = resolve; });
+  const server = await createPipeServer(pipeName, {
+    message(message) {
+      if (message.type === "hello") ready();
+      if (message.type === "status" && launch.status !== "running") delivered();
+      return { launch: { ...launch } };
+    },
+    disconnect: () => delivered(),
+  });
+  let timer;
+  try {
+    openProgressPane(pipeName, context);
+    await Promise.race([connected, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Cleanup progress pane could not connect.")), 30000);
+    })]);
+    clearTimeout(timer);
+    try {
+      await runCleanup(context, async (step) => {
+        launch.step = step;
+        await new Promise((resolve) => setImmediate(resolve));
+      });
+      launch.status = "started";
+    } catch (error) {
+      launch.status = "failed";
+      launch.error = error.message;
+      console.error(error.message);
+      process.exitCode = 1;
+    }
+    await Promise.race([finished, new Promise((resolve) => { timer = setTimeout(resolve, 2000); })]);
+  } finally { clearTimeout(timer); await server.shutdown(); }
 }
 
 async function watcher(encodedPayload) {

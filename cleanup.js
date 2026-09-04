@@ -73,7 +73,7 @@ function manualWorkspace(workspace, agents = []) {
   }
   if (!worktree?.is_linked_worktree || (!TERMINAL_STATES.has(tokens.workflow_state) && !running)
     || !WORKFLOW_KINDS.has(tokens.workflow_kind) || !tokens.workflow_root_pane
-    || !UUID.test(tokens.workflow_session)) throw new CleanupStop("current workspace has no Codex workflow metadata");
+    || !UUID.test(tokens.workflow_session)) throw new CleanupStop("This workspace has no Codex workflow to clean up.");
   if (tokens.workflow_controller !== (running ? "active" : "inactive")) throw new CleanupStop("workflow controller state is inconsistent");
   if (running && !String(tokens.workflow_controller_pipe || "").startsWith("\\\\.\\pipe\\herdr-codex-workflows-")) {
     throw new CleanupStop("active workflow does not support coordinated cleanup");
@@ -162,12 +162,14 @@ async function cleanupTransaction(payload, ops, claimed = false) {
   if (!claimed) return withCleanupClaim(payload, () => cleanupTransaction(payload, ops, true));
   const abandon = typeof ops.abandon === "function";
   try {
+    await ops.progress?.(0);
     if (!await preflight(payload, ops, true, abandon)) return { status: "missing" };
   } catch (error) {
     if (error.retryable) return { status: "retry", reason: safeReason(error, "Owning Codex session is still active.") };
     return { status: "stopped", reason: safeReason(error, "Cleanup preflight failed; the workspace was retained.") };
   }
   try {
+    await ops.progress?.(1);
     if (abandon) await ops.abandon();
     await ops.release(payload.workspaceId, payload.rootPaneId, payload.sessionId, payload.worktreePath);
   } catch (error) {
@@ -175,17 +177,19 @@ async function cleanupTransaction(payload, ops, claimed = false) {
     return { status: "stopped", reason: "Codex session release failed; the workspace and worktree were retained." };
   }
   try {
+    await ops.progress?.(2);
     await ops.archive(payload.sessionId);
   } catch {
     return { status: "stopped", reason: "Codex session archive failed; the worktree was not removed." };
   }
   try {
+    await ops.progress?.(3);
     const after = await snapshot(payload, ops);
     if (!assertLocalIdentity(payload, after, false)) throw new CleanupStop("workspace disappeared after session archive");
   } catch (error) {
     return { status: "partial", reason: safeReason(error, "Post-archive validation failed; the worktree was retained.") };
   }
-  try { await ops.remove(payload.workspaceId); }
+  try { await ops.progress?.(4); await ops.remove(payload.workspaceId); }
   catch { return { status: "partial", reason: "Herdr could not remove the worktree after session archive; manual inspection is required." }; }
   return { status: "removed" };
 }

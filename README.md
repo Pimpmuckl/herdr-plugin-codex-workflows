@@ -103,7 +103,12 @@ workspace and worktree without force. The workflow branch remains.
 
 Failure and cancellation keep all workflow state. The
 `cleanup-current-workflow` action uses the same archive-first transaction
-without waiting for a merge. For an idle or waiting active workflow, it first
+without waiting for a merge. Manual cleanup opens the same slim bottom progress
+pane as dispatch, showing workspace checks, Codex shutdown, session archiving,
+and worktree removal. Failures stay visible; focus the pane and press Enter,
+Escape, or Ctrl+C to close it. Successful removal closes the workspace and its
+progress pane. Closing the progress pane does not cancel cleanup.
+For an idle or waiting active workflow, it first
 cancels the controller. It refuses a changed identity, dirty worktree, working
 or changed agent, path outside
 `C:\Code\.worktrees`, or an ambiguous Codex session. An archive failure removes
