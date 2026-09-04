@@ -436,6 +436,12 @@ function cleanupOps(workspaceId, abandon) {
     remove: async (workspaceId) => runHerdr(["worktree", "remove", "--workspace", workspaceId]),
     cleanup: async () => (await cleanupCurrentWorkflow(workspaceId)).result,
     project: async (state) => projectCleanup(workspaceId, state),
+    merged: async (workspace) => {
+      const prefix = workspace.label.match(/^\[[^\]]+\]/)?.[0] || workspace.label;
+      runHerdr(["workspace", "rename", workspaceId, `${prefix} merged ✓`]);
+      runHerdr(["workspace", "report-metadata", workspaceId, "--source", METADATA_SOURCE,
+        "--token", "workflow_phase=merged", "--token", "workflow_pr_state=merged"]);
+    },
     notify: async (title, body) => notify(title, body, title === "Codex workflow cleaned up" ? "done" : "request"),
     delay,
     ...(abandon ? { abandon: async () => {
@@ -452,15 +458,16 @@ async function handoffCleanup(runtime, repository) {
     worktreePath: runtime.worktree.path, repoRoot: repository.root, repo: repository.repo,
     branch: runtime.identity.branch, sessionId: runtime.ownerSessionId,
     prNumber: associatedPr(runtime.workflow, runtime.terminal, runtime.prNumber, repository.repo),
+    indicatorOnly: !autoCleanupOnPrMerge(),
   };
   await handoffWatcher(__filename, payload, async () => {
     runHerdr([
       "workspace", "report-metadata", workspaceId, "--source", METADATA_SOURCE,
       "--token", "workflow_state=complete", "--token", "workflow_controller=inactive",
-      "--token", `workflow_branch=${runtime.identity.branch}`, "--token", "workflow_cleanup=waiting",
+      "--token", `workflow_branch=${runtime.identity.branch}`, "--token", `workflow_cleanup=${payload.indicatorOnly ? "manual" : "waiting"}`,
     ]);
   });
-  notify("Codex workflow waiting for PR merge", "The workspace will be cleaned up after this pull request merges.");
+  if (!payload.indicatorOnly) notify("Codex workflow waiting for PR merge", "The workspace will be cleaned up after this pull request merges.");
 }
 
 async function cleanupCurrentWorkflow(workspaceId) {
@@ -756,18 +763,14 @@ async function controller(mode = "github") {
       return;
     }
     if (runtime.terminal?.status === "complete") {
-      if (autoCleanupOnPrMerge()) {
         try {
           await handoffCleanup(runtime, repository);
         }
         catch (error) {
           try { projectCleanup(runtime.worktree.workspace.workspace_id, "stopped"); } catch (projectError) { console.error(`cleanup metadata update failed: ${projectError.message}`); }
-          notify("Codex workflow cleanup stopped", "Automatic cleanup could not be armed; the workspace and branch remain.");
+          notify("Codex workflow PR tracking stopped", "Could not watch for PR merge; the workspace and branch remain.");
           console.error(`cleanup handoff failed: ${error.message}`);
         }
-      } else {
-        projectCleanup(runtime.worktree.workspace.workspace_id, "manual");
-      }
     } else {
       try { await releaseParent(runtime); } catch (error) { console.error(`parent release failed: ${error.message}`); }
     }

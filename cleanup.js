@@ -218,6 +218,18 @@ async function handoffWatcher(controller, payload, authorize, options = {}) {
 async function watch(payload, ops, interval = 60000) {
   payload = validatePayload(payload);
   if (payload.prNumber === null) throw new Error("cleanup watcher has no pull request");
+  if (payload.indicatorOnly) {
+    while (true) {
+      try {
+        const workspace = await ops.workspace(payload.workspaceId);
+        if (!workspace || workspace.tokens?.workflow_branch !== payload.branch) return "superseded";
+        const state = classifyPullRequest(await ops.pullRequest(payload.repo, payload.prNumber));
+        if (state === "merged") { await ops.merged(workspace); return "merged"; }
+        if (state === "closed") return "closed";
+      } catch { /* Retry transient workspace/GitHub failures without touching the session. */ }
+      await ops.delay(interval);
+    }
+  }
   try {
     if (!await preflight(payload, ops, true)) return "superseded";
   } catch (error) {

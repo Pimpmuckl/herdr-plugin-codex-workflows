@@ -203,3 +203,22 @@ test("serializes concurrent cleanup requests", async () => {
   release();
   assert.equal((await running).status, "removed");
 });
+
+test("merge indicator retries without cleanup, even with active agents and dirty files", async () => {
+  const live = fixture({ ownerWorking: true, dirty: " M file" });
+  let views = 0, merged = 0;
+  live.ops.pullRequest = async () => {
+    if (++views === 1) throw new Error("offline");
+    return views === 2 ? { state: "OPEN" } : { state: "MERGED", mergedAt: "now" };
+  };
+  live.ops.merged = async () => { merged++; };
+  assert.equal(await watch({ ...payload, indicatorOnly: true }, live.ops, 0), "merged");
+  assert.equal(merged, 1);
+  assert.equal(views, 3);
+  assert.equal(live.calls.some((call) => ["cleanup", "release", "archive", "remove"].includes(call)), false);
+  for (const options of [{ missing: true }, { pull: { state: "CLOSED" } }]) {
+    const retained = fixture(options);
+    retained.ops.merged = async () => assert.fail("must not mark missing/closed PR as merged");
+    assert.equal(await watch({ ...payload, indicatorOnly: true }, retained.ops, 0), options.missing ? "superseded" : "closed");
+  }
+});

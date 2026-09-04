@@ -79,7 +79,12 @@ for human input. In each case, Codex, the controller, worktree, and workspace
 stay available for follow-up. The controller checks again after follow-up
 activity settles. Once an implementation workflow has exactly one valid pull
 request, or a pull-request review completes, the controller leaves the Codex
-session and worktree available and exits. Cleanup is manual by default.
+session and worktree available and exits. A detached watcher checks the associated
+PR once per minute and changes the workspace label to `[I-3611] merged ✓` (or
+the corresponding PR/task label) on merge. It does not stop or archive Codex,
+or remove the worktree. Closed, unmerged PRs do not get a merged indicator.
+Cleanup is manual by default. This applies to newly dispatched workflows;
+existing completed workspaces are not retroactively watched.
 
 To clean up automatically after the pull request merges, run
 `herdr plugin config-dir pimpmuckl.codex-workflows` and create `config.json` in
