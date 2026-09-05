@@ -118,6 +118,13 @@ A Herdr or machine restart loses an active watcher. The plugin has no registry
 or startup recovery and does not reconstruct the wait after restart. Use the
 manual cleanup action after inspection when its safety checks still pass.
 
+Workflow identity is saved in `herdr-codex-workflow.json` inside each worktree's
+private Git directory, outside tracked files. After Herdr loses its display
+metadata on restart, manual cleanup restores identity from this record and checks
+whether the original controller is still alive before proceeding. It still checks
+the owning session and worktree before archiving or removing anything. Older
+workflows without this record cannot be recovered automatically.
+
 Non-goals are persistent workflow state, dashboards, background services,
 automatic recovery, automatic merge, force removal, and workflow-branch
 deletion.

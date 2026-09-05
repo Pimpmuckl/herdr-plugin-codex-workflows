@@ -8,6 +8,7 @@ const { stdin: input, stdout: output } = require("node:process");
 const { issuePrompt, prPrompt, taskPrompt } = require("./prompts.js");
 const {
   associatedPr, cleanupTransaction, decodePayload, handoffWatcher, manualWorkspace, matchingOwnedSession, matchingSession, watch, withCleanupClaim,
+  readWorkflowIdentity, writeWorkflowIdentity, recoveredWorkspace,
 } = require("./cleanup.js");
 const {
   Lifecycle, WORKTREE_ROOT, collisionReason, connectPipe, createPipeServer, makeIdentity,
@@ -251,16 +252,54 @@ function createWorktree(repository, identity, baseSha) {
   return { ...result, path: worktree };
 }
 
-function project(runtime, state = "working", reason = "") {
+function saveWorkflowIdentity(runtime) {
+  writeWorkflowIdentity(git(runtime.worktree.path, ["rev-parse", "--absolute-git-dir"]), {
+    workflow_kind: runtime.workflow,
+    workflow_branch: runtime.identity.branch,
+    workflow_root_pane: runtime.worktree.root_pane.pane_id,
+    workflow_session: runtime.ownerSessionId,
+    workflow_controller_pipe: runtime.controllerPipe,
+  });
+}
+
+async function restoreWorkflowIdentity(workspace) {
+  if (!workspace.worktree?.is_linked_worktree || workspace.tokens?.workflow_kind) return;
+  const identity = readWorkflowIdentity(git(workspace.worktree.checkout_path, ["rev-parse", "--absolute-git-dir"]));
+  if (!identity) return;
+  // Validate the stored identity before probing its controller pipe.
+  recoveredWorkspace(workspace, identity, true);
+  let controllerAlive = false;
+  try {
+    const client = await connectPipe(identity.workflow_controller_pipe);
+    client.socket.end();
+    controllerAlive = true;
+  } catch (error) {
+    if (!["ENOENT", "ECONNREFUSED"].includes(error.code)) throw error;
+  }
+  workspace.tokens = recoveredWorkspace(workspace, identity, controllerAlive).tokens;
+  runHerdr(["workspace", "report-metadata", workspace.workspace_id, "--source", METADATA_SOURCE,
+    ...Object.entries(workspace.tokens).flatMap(([key, value]) => ["--token", `${key}=${value}`])]);
+}
+
+function project(runtime, state = "working", reason = "", operations = {}) {
   const phase = state === "waiting" ? "waiting" : "working";
   const text = state === "blocked" ? "working · blocked" : phase;
   const workspaceId = runtime.worktree.workspace.workspace_id;
   const paneId = runtime.worktree.root_pane.pane_id;
   try {
-    const owner = getAgent(runtime.identity.agentName);
-    if (owner) runtime.ownerSessionId = matchingSession([owner], workspaceId, paneId).agent_session.value;
-    runHerdr(["workspace", "rename", workspaceId, `[${runtime.identity.shortLabel}] ${text}`]);
-    runHerdr([
+    const owner = (operations.agent || getAgent)(runtime.identity.agentName);
+    if (owner && !runtime.ownerSessionId) runtime.ownerSessionId = matchingSession([owner], workspaceId, paneId).agent_session.value;
+  } catch (error) {
+    console.error(`session discovery pending: ${error.message}`);
+  }
+  if (runtime.ownerSessionId && !runtime.identitySaved) {
+    (operations.save || saveWorkflowIdentity)(runtime);
+    runtime.identitySaved = true;
+  }
+  try {
+    const report = operations.report || runHerdr;
+    report(["workspace", "rename", workspaceId, `[${runtime.identity.shortLabel}] ${text}`]);
+    report([
       "workspace", "report-metadata", workspaceId, "--source", METADATA_SOURCE,
       "--token", `workflow_kind=${runtime.workflow}`,
       "--token", `workflow_state=${runtime.lifecycle.state}`,
@@ -270,7 +309,7 @@ function project(runtime, state = "working", reason = "") {
       "--token", `workflow_controller_pipe=${runtime.controllerPipe}`,
       ...(runtime.ownerSessionId ? ["--token", `workflow_root_pane=${paneId}`, "--token", `workflow_session=${runtime.ownerSessionId}`] : []),
     ]);
-    runHerdr([
+    report([
       "pane", "report-metadata", paneId, "--source", METADATA_SOURCE,
       "--display-agent", "Codex workflow", "--title", `${runtime.identity.shortLabel} parent`,
       "--state-label", `working=${text}`, "--state-label", `blocked=${compact(reason) || "needs input"}`,
@@ -286,7 +325,11 @@ function projectTerminal(runtime, report, candidate = getAgent(runtime.identity.
   const paneId = runtime.worktree.root_pane.pane_id;
   let owner = null;
   try { owner = candidate && matchingSession([candidate], workspaceId, paneId); } catch {}
-  if (owner) runtime.ownerSessionId = owner.agent_session.value;
+  if (owner && !runtime.ownerSessionId) runtime.ownerSessionId = owner.agent_session.value;
+  if (runtime.ownerSessionId && !runtime.identitySaved) {
+    saveWorkflowIdentity(runtime);
+    runtime.identitySaved = true;
+  }
   const stale = runtime.workflow === "pr" && report.status === "complete" && report["reviewed-head"].toLowerCase() !== report["current-head"].toLowerCase();
   const resultText = report.status === "complete" ? (stale ? "complete · head changed" : isImplementationWorkflow(runtime.workflow) ? "complete · PR open" : "complete") : report.status;
   try {
@@ -474,6 +517,7 @@ async function handoffCleanup(runtime, repository) {
 async function cleanupCurrentWorkflow(workspaceId, progress) {
   const workspace = getWorkspace(workspaceId);
   if (!workspace) return { result: { status: "missing" }, worktree: null, branch: null };
+  await restoreWorkflowIdentity(workspace);
   const { worktree, tokens } = manualWorkspace(workspace, listAgents());
   const abandon = tokens.workflow_state === "RUNNING";
   const branch = git(worktree.checkout_path, ["branch", "--show-current"]);
@@ -553,6 +597,7 @@ async function monitor(runtime, repository, operations = {}) {
       runtime.terminal = { type: "terminal", status: "cancelled", reason: "workflow workspace was closed" };
     }
     const agent = agentByName(runtime.identity.agentName);
+    if (agent?.agent_session && !runtime.ownerSessionId) updateProject(runtime, lastProjection);
     if (runtime.terminal) {
       runtime.lifecycle.transition("cancel");
       updateTerminal(runtime, runtime.terminal, agent);
@@ -1021,6 +1066,7 @@ async function main() {
 }
 
 module.exports = { autoCleanupOnPrMerge, canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup, openProgressPane,
+  project,
   implementationPullRequest, isAgentPromptStalled, monitor, popupInputKey, popupInputView, progressView, resolveRepository, sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands,
   waitForActivity };
 

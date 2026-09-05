@@ -8,6 +8,7 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   autoCleanupOnPrMerge, canonicalRepositoryRoot, codexAgentStartArgs, completeGitHubTarget, controllerProtocol, openInputPopup,
+  project,
   implementationPullRequest, isAgentPromptStalled, monitor, openProgressPane, popupInputKey, popupInputView, progressView, resolveRepository,
   sourceDirectory, stalledPromptRecovery, stalledPromptRecoveryCommands, waitForActivity,
 } = require("./controller.js");
@@ -276,6 +277,32 @@ test("controller yields when manual cleanup takes ownership", async () => {
     agent: () => assert.fail("cleanup owns the agent before monitor checks it"),
   });
   assert.equal(result, "cleanup");
+});
+
+test("late session discovery does not block status and is retried while Codex stays working", async () => {
+  const runtime = {
+    lifecycle: { state: "RUNNING" }, workflow: "issue", prompt: {},
+    identity: { agentName: "worker", shortLabel: "I-1", branch: "codex/issue-1" },
+    worktree: { workspace: { workspace_id: "w1" }, root_pane: { pane_id: "w1:p1" } },
+  };
+  const agent = { workspace_id: "w1", pane_id: "w1:p1", agent_status: "working" };
+  const reports = [], saved = [];
+  const update = (runtime, state) => project(runtime, state, "", {
+    agent: () => agent, report: (args) => reports.push(args), save: (runtime) => saved.push(runtime.ownerSessionId),
+  });
+  update(runtime, "working");
+  assert.ok(reports.some((args) => args.includes("workflow_state=RUNNING")));
+  assert.deepEqual(saved, []);
+  let polls = 0;
+  await monitor(runtime, {}, {
+    workspace: () => ({}), agent: () => agent, project: update,
+    delay: async () => {
+      if (++polls === 1) agent.agent_session = { source: "herdr:codex", kind: "id", value: "019cbe72-e55b-73d1-87d8-4e01f1f75043" };
+      else runtime.cleanupRequest = {};
+    },
+  });
+  assert.deepEqual(saved, ["019cbe72-e55b-73d1-87d8-4e01f1f75043"]);
+  assert.ok(reports.some((args) => args.includes("workflow_session=019cbe72-e55b-73d1-87d8-4e01f1f75043")));
 });
 
 test("controller acknowledges cleanup only after yielding", async () => {

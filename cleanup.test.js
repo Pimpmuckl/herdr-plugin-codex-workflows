@@ -3,8 +3,10 @@
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const test = require("node:test");
+const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const {
   associatedPr, classifyPullRequest, cleanupTransaction, encodePayload, handoffWatcher, manualWorkspace, matchingOwnedSession, matchingSession, watch,
+  readWorkflowIdentity, writeWorkflowIdentity, recoveredWorkspace,
 } = require("./cleanup.js");
 
 const payload = {
@@ -208,6 +210,26 @@ test("serializes concurrent cleanup requests", async () => {
   assert.equal(second.calls.includes("archive"), false);
   release();
   assert.equal((await running).status, "removed");
+});
+
+test("saved identity recovers cleanup after metadata loss without reviving a dead controller", async (t) => {
+  const gitDir = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-identity-"));
+  t.after(() => fs.rmSync(gitDir, { recursive: true, force: true }));
+  assert.equal(readWorkflowIdentity(gitDir), null);
+  const live = fixture({ running: true });
+  const workspace = await live.ops.workspace();
+  writeWorkflowIdentity(gitDir, workspace.tokens);
+  workspace.tokens = {};
+  const stored = readWorkflowIdentity(gitDir);
+  assert.equal(recoveredWorkspace(workspace, stored, true).tokens.workflow_controller, "active");
+  workspace.tokens = recoveredWorkspace(workspace, stored, false).tokens;
+  assert.equal(workspace.tokens.workflow_controller, "inactive");
+  assert.equal((await cleanupTransaction(payload, live.ops)).status, "removed");
+  const changed = fixture({ rootReplacement: true });
+  const changedWorkspace = await changed.ops.workspace();
+  changedWorkspace.tokens = recoveredWorkspace(changedWorkspace, stored, false).tokens;
+  assert.equal((await cleanupTransaction(payload, changed.ops)).status, "stopped");
+  assert.equal(changed.calls.includes("archive"), false);
 });
 
 test("merge indicator retries without cleanup, even with active agents and dirty files", async () => {

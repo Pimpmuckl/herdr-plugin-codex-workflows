@@ -1,6 +1,7 @@
 "use strict";
 
 const path = require("node:path");
+const fs = require("node:fs");
 const crypto = require("node:crypto"), net = require("node:net");
 const { spawn } = require("node:child_process");
 const { WORKTREE_ROOT, normalizePath, parseGitHubRemote, parseSameRepositoryPullRequest, parseWorktreeList } = require("./workflow.js");
@@ -10,6 +11,33 @@ const TERMINAL_STATES = new Set(["complete", "failed", "cancelled"]);
 const WORKFLOW_KINDS = new Set(["issue", "pr", "task"]);
 
 class CleanupStop extends Error {}
+
+function writeWorkflowIdentity(gitDir, identity) {
+  const target = path.join(gitDir, "herdr-codex-workflow.json");
+  const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(identity));
+    fs.renameSync(temporary, target);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+}
+
+function readWorkflowIdentity(gitDir) {
+  try { return JSON.parse(fs.readFileSync(path.join(gitDir, "herdr-codex-workflow.json"), "utf8")); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+}
+
+function recoveredWorkspace(workspace, identity, controllerAlive) {
+  const restored = { ...workspace, tokens: {
+    ...identity,
+    workflow_state: controllerAlive ? "RUNNING" : "cancelled",
+    workflow_controller: controllerAlive ? "active" : "inactive",
+    workflow_cleanup: "manual",
+  } };
+  manualWorkspace(restored);
+  return restored;
+}
 
 function safeReason(error, fallback) {
   return error instanceof CleanupStop ? error.message : fallback;
@@ -264,6 +292,7 @@ async function watch(payload, ops, interval = 60000) {
 }
 
 module.exports = {
+  readWorkflowIdentity, writeWorkflowIdentity, recoveredWorkspace,
   associatedPr, classifyPullRequest, cleanupTransaction, decodePayload, encodePayload,
   handoffWatcher, manualWorkspace, matchingOwnedSession, matchingSession, watch, withCleanupClaim,
 };
