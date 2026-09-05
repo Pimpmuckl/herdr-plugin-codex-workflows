@@ -287,8 +287,12 @@ test("late session discovery does not block status and is retried while Codex st
   };
   const agent = { workspace_id: "w1", pane_id: "w1:p1", agent_status: "working" };
   const reports = [], saved = [];
+  let saveAttempts = 0;
   const update = (runtime, state) => project(runtime, state, "", {
-    agent: () => agent, report: (args) => reports.push(args), save: (runtime) => saved.push(runtime.ownerSessionId),
+    agent: () => agent, report: (args) => reports.push(args), save: (runtime) => {
+      if (++saveAttempts === 1) throw new Error("worktree temporarily unavailable");
+      saved.push(runtime.ownerSessionId);
+    },
   });
   update(runtime, "working");
   assert.ok(reports.some((args) => args.includes("workflow_state=RUNNING")));
@@ -298,10 +302,11 @@ test("late session discovery does not block status and is retried while Codex st
     workspace: () => ({}), agent: () => agent, project: update,
     delay: async () => {
       if (++polls === 1) agent.agent_session = { source: "herdr:codex", kind: "id", value: "019cbe72-e55b-73d1-87d8-4e01f1f75043" };
-      else runtime.cleanupRequest = {};
+      else if (polls === 3) runtime.cleanupRequest = {};
     },
   });
   assert.deepEqual(saved, ["019cbe72-e55b-73d1-87d8-4e01f1f75043"]);
+  assert.equal(saveAttempts, 2);
   assert.ok(reports.some((args) => args.includes("workflow_session=019cbe72-e55b-73d1-87d8-4e01f1f75043")));
 });
 

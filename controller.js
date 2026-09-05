@@ -262,6 +262,16 @@ function saveWorkflowIdentity(runtime) {
   });
 }
 
+function captureWorkflowIdentity(runtime, save = saveWorkflowIdentity) {
+  if (!runtime.ownerSessionId || runtime.identitySaved) return;
+  try {
+    save(runtime);
+    runtime.identitySaved = true;
+  } catch (error) {
+    console.error(`workflow identity could not be saved: ${error.message}`);
+  }
+}
+
 async function restoreWorkflowIdentity(workspace) {
   if (!workspace.worktree?.is_linked_worktree || workspace.tokens?.workflow_kind) return;
   const identity = readWorkflowIdentity(git(workspace.worktree.checkout_path, ["rev-parse", "--absolute-git-dir"]));
@@ -292,10 +302,7 @@ function project(runtime, state = "working", reason = "", operations = {}) {
   } catch (error) {
     console.error(`session discovery pending: ${error.message}`);
   }
-  if (runtime.ownerSessionId && !runtime.identitySaved) {
-    (operations.save || saveWorkflowIdentity)(runtime);
-    runtime.identitySaved = true;
-  }
+  captureWorkflowIdentity(runtime, operations.save);
   try {
     const report = operations.report || runHerdr;
     report(["workspace", "rename", workspaceId, `[${runtime.identity.shortLabel}] ${text}`]);
@@ -326,10 +333,7 @@ function projectTerminal(runtime, report, candidate = getAgent(runtime.identity.
   let owner = null;
   try { owner = candidate && matchingSession([candidate], workspaceId, paneId); } catch {}
   if (owner && !runtime.ownerSessionId) runtime.ownerSessionId = owner.agent_session.value;
-  if (runtime.ownerSessionId && !runtime.identitySaved) {
-    saveWorkflowIdentity(runtime);
-    runtime.identitySaved = true;
-  }
+  captureWorkflowIdentity(runtime);
   const stale = runtime.workflow === "pr" && report.status === "complete" && report["reviewed-head"].toLowerCase() !== report["current-head"].toLowerCase();
   const resultText = report.status === "complete" ? (stale ? "complete · head changed" : isImplementationWorkflow(runtime.workflow) ? "complete · PR open" : "complete") : report.status;
   try {
@@ -597,7 +601,7 @@ async function monitor(runtime, repository, operations = {}) {
       runtime.terminal = { type: "terminal", status: "cancelled", reason: "workflow workspace was closed" };
     }
     const agent = agentByName(runtime.identity.agentName);
-    if (agent?.agent_session && !runtime.ownerSessionId) updateProject(runtime, lastProjection);
+    if (!runtime.terminal && agent?.agent_session && !runtime.identitySaved) updateProject(runtime, lastProjection);
     if (runtime.terminal) {
       runtime.lifecycle.transition("cancel");
       updateTerminal(runtime, runtime.terminal, agent);
